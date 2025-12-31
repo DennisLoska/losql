@@ -4,6 +4,7 @@
 - Vim key bindings `useVim`
 - api integration + postgres connection
 - LSP integration
+- LLM integration
 
 # SQL Analyzer
 
