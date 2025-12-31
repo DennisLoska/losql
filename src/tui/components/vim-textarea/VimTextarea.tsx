@@ -1,7 +1,7 @@
 import { extend } from "@opentui/solid";
 import { VimTextareaRenderable, type VimMode } from "./VimTextareaRenderable";
 import type { Component } from "solid-js";
-import type { ColorInput } from "@opentui/core";
+import type { ColorInput, KeyEvent } from "@opentui/core";
 
 extend({ vim_textarea: VimTextareaRenderable });
 
@@ -18,6 +18,7 @@ export interface VimTextareaProps {
   onModeChange?: (mode: VimMode) => void;
   onBufferChange?: (content: string) => void;
   onCursorChange?: (event: { line: number; visualColumn: number }) => void;
+  onKeyDown?: (key: KeyEvent) => void;
   width?: number | string;
   height?: number | string;
   flexGrow?: number;
@@ -39,6 +40,7 @@ export const VimTextarea: Component<VimTextareaProps> = (props) => {
       onModeChange={props.onModeChange}
       onBufferChange={props.onBufferChange}
       onCursorChange={props.onCursorChange}
+      onKeyDown={props.onKeyDown}
       width={props.width}
       height={props.height}
       flexGrow={props.flexGrow}

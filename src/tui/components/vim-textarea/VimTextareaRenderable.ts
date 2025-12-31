@@ -22,12 +22,14 @@ export interface VisualSelection {
 export interface VimTextareaOptions extends TextareaOptions {
   onModeChange?: (mode: VimMode) => void;
   onBufferChange?: (content: string) => void;
+  onKeyDown?: (key: KeyEvent) => void;
 }
 
 export class VimTextareaRenderable extends TextareaRenderable {
   private _mode: VimMode = "normal";
   private _modeChangeListener?: (mode: VimMode) => void;
   private _bufferChangeListener?: (content: string) => void;
+  private _keyDownListener?: (key: KeyEvent) => void;
   private _pendingOperator: string | null = null; // For dd, yy, etc.
   private _yankRegister: YankRegister = { text: "", isLinewise: false };
   private _visualAnchor: VisualSelection | null = null;
@@ -55,6 +57,7 @@ export class VimTextareaRenderable extends TextareaRenderable {
 
     this._modeChangeListener = options.onModeChange;
     this._bufferChangeListener = options.onBufferChange;
+    this._keyDownListener = options.onKeyDown;
     this.updateCursorForMode();
   }
 
@@ -123,6 +126,11 @@ export class VimTextareaRenderable extends TextareaRenderable {
   }
 
   public override handleKeyPress(key: KeyEvent): boolean {
+    // Notify keydown listener
+    if (this._keyDownListener) {
+      this._keyDownListener(key);
+    }
+
     // Handle waiting for character (r command)
     if (this._waitingForChar === "r") {
       return this.handleReplaceChar(key);
@@ -831,5 +839,13 @@ export class VimTextareaRenderable extends TextareaRenderable {
 
   public get onBufferChange(): ((content: string) => void) | undefined {
     return this._bufferChangeListener;
+  }
+
+  public override set onKeyDown(handler: ((key: KeyEvent) => void) | undefined) {
+    this._keyDownListener = handler;
+  }
+
+  public override get onKeyDown(): ((key: KeyEvent) => void) | undefined {
+    return this._keyDownListener;
   }
 }

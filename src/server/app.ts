@@ -8,14 +8,22 @@ namespace Server {
       port: 3000,
       routes: {
         "/api/sql": async (req) => {
-          // const body = req.body?.json();
-          // const { query } = body;
-
-          // Off course we want to inject SQL from the client!
-          // It's an SQL editor after all, might add a serializer if needed
-          const res = await sql`select * from calls limit 5`;
-          const json = JSON.stringify(res);
-          return new Response(json);
+          try {
+            const body = await req.body?.json();
+            // Of course we want to inject SQL from the client!
+            // It's an SQL editor after all!
+            const res = await sql.unsafe(body.query);
+            const report = await sql.unsafe(
+              `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON ) ${body.query}`,
+            );
+            const json = JSON.stringify({ results: res, report, error: null });
+            return new Response(json);
+          } catch (error) {
+            console.log(error);
+            return new Response(
+              JSON.stringify({ results: null, report: null, error }),
+            );
+          }
         },
 
         "/api/lsp": () => {
