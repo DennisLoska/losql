@@ -455,7 +455,11 @@ export class VimTextareaRenderable extends TextareaRenderable {
 
     // ─── Basic motions ───
     if (key.name === "h" || key.name === "left") {
-      this.moveCursorLeft();
+      // Vim behavior: h stops at column 0, doesn't wrap to previous line
+      const cursor = this.logicalCursor;
+      if (cursor.col > 0) {
+        this.moveCursorLeft();
+      }
       return true;
     }
 
@@ -470,7 +474,12 @@ export class VimTextareaRenderable extends TextareaRenderable {
     }
 
     if (key.name === "l" || key.name === "right") {
-      this.moveCursorRight();
+      // Vim behavior: l stops at end of line, doesn't wrap to next line
+      const cursor = this.logicalCursor;
+      const lineLen = this.getCurrentLineLength();
+      if (cursor.col < lineLen - 1 || lineLen === 0) {
+        this.moveCursorRight();
+      }
       return true;
     }
 
@@ -654,7 +663,11 @@ export class VimTextareaRenderable extends TextareaRenderable {
 
     // ─── Motions (extend selection) ───
     if (key.name === "h" || key.name === "left") {
-      this.moveCursorLeft({ select: true });
+      // Vim behavior: h stops at column 0, doesn't wrap to previous line
+      const cursor = this.logicalCursor;
+      if (cursor.col > 0) {
+        this.moveCursorLeft({ select: true });
+      }
       return true;
     }
 
@@ -669,7 +682,12 @@ export class VimTextareaRenderable extends TextareaRenderable {
     }
 
     if (key.name === "l" || key.name === "right") {
-      this.moveCursorRight({ select: true });
+      // Vim behavior: l stops at end of line, doesn't wrap to next line
+      const cursor = this.logicalCursor;
+      const lineLen = this.getCurrentLineLength();
+      if (cursor.col < lineLen) {
+        this.moveCursorRight({ select: true });
+      }
       return true;
     }
 
