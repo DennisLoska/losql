@@ -21,11 +21,13 @@ export interface VisualSelection {
 
 export interface VimTextareaOptions extends TextareaOptions {
   onModeChange?: (mode: VimMode) => void;
+  onBufferChange?: (content: string) => void;
 }
 
 export class VimTextareaRenderable extends TextareaRenderable {
   private _mode: VimMode = "normal";
   private _modeChangeListener?: (mode: VimMode) => void;
+  private _bufferChangeListener?: (content: string) => void;
   private _pendingOperator: string | null = null; // For dd, yy, etc.
   private _yankRegister: YankRegister = { text: "", isLinewise: false };
   private _visualAnchor: VisualSelection | null = null;
@@ -52,7 +54,14 @@ export class VimTextareaRenderable extends TextareaRenderable {
     });
 
     this._modeChangeListener = options.onModeChange;
+    this._bufferChangeListener = options.onBufferChange;
     this.updateCursorForMode();
+  }
+
+  private notifyContentChange(): void {
+    if (this._bufferChangeListener) {
+      this._bufferChangeListener(this.plainText);
+    }
   }
 
   public get mode(): VimMode {
@@ -63,8 +72,11 @@ export class VimTextareaRenderable extends TextareaRenderable {
     if (this._mode === mode) return;
 
     // Clear visual selection when leaving visual modes
-    if ((this._mode === "visual" || this._mode === "visual-line") && 
-        mode !== "visual" && mode !== "visual-line") {
+    if (
+      (this._mode === "visual" || this._mode === "visual-line") &&
+      mode !== "visual" &&
+      mode !== "visual-line"
+    ) {
       this._visualAnchor = null;
       // Clear the text selection highlight
       this.clearVisualHighlight();
@@ -205,9 +217,9 @@ export class VimTextareaRenderable extends TextareaRenderable {
 
   private pasteAfter(): void {
     if (!this._yankRegister.text) return;
-    
+
     const cursor = this.logicalCursor;
-    
+
     if (this._yankRegister.isLinewise) {
       // Paste on new line below
       const lineLen = this.getCurrentLineLength();
@@ -227,9 +239,9 @@ export class VimTextareaRenderable extends TextareaRenderable {
 
   private pasteBefore(): void {
     if (!this._yankRegister.text) return;
-    
+
     const cursor = this.logicalCursor;
-    
+
     if (this._yankRegister.isLinewise) {
       // Paste on new line above
       this.editBuffer.setCursor(cursor.row, 0);
@@ -247,10 +259,10 @@ export class VimTextareaRenderable extends TextareaRenderable {
   private deleteVisualSelection(): void {
     const selection = this.getSelection();
     if (!selection) return;
-    
+
     // Get the start position for cursor placement after delete
     const startPos = this.editBuffer.offsetToPosition(selection.start);
-    
+
     // Delete the selected range
     if (this._mode === "visual-line") {
       // For line-wise, we need to delete full lines
@@ -258,10 +270,16 @@ export class VimTextareaRenderable extends TextareaRenderable {
       const endLinePos = this.editBuffer.offsetToPosition(selection.end);
       if (startLinePos && endLinePos) {
         // Delete from start of first line to end of last line (including newline)
-        const startOffset = this.editBuffer.positionToOffset(startLinePos.row, 0);
+        const startOffset = this.editBuffer.positionToOffset(
+          startLinePos.row,
+          0,
+        );
         const lines = this.getLines();
         const endLineLen = lines[endLinePos.row]?.length ?? 0;
-        let endOffset = this.editBuffer.positionToOffset(endLinePos.row, endLineLen);
+        let endOffset = this.editBuffer.positionToOffset(
+          endLinePos.row,
+          endLineLen,
+        );
         // Include the newline if not at end of buffer
         if (endLinePos.row < lines.length - 1) {
           endOffset += 1;
@@ -269,7 +287,12 @@ export class VimTextareaRenderable extends TextareaRenderable {
         const startCoords = this.editBuffer.offsetToPosition(startOffset);
         const endCoords = this.editBuffer.offsetToPosition(endOffset);
         if (startCoords && endCoords) {
-          this.editBuffer.deleteRange(startCoords.row, startCoords.col, endCoords.row, endCoords.col);
+          this.editBuffer.deleteRange(
+            startCoords.row,
+            startCoords.col,
+            endCoords.row,
+            endCoords.col,
+          );
         }
         this.editBuffer.setCursor(startLinePos.row, 0);
       }
@@ -278,7 +301,12 @@ export class VimTextareaRenderable extends TextareaRenderable {
       const startCoords = this.editBuffer.offsetToPosition(selection.start);
       const endCoords = this.editBuffer.offsetToPosition(selection.end);
       if (startCoords && endCoords) {
-        this.editBuffer.deleteRange(startCoords.row, startCoords.col, endCoords.row, endCoords.col);
+        this.editBuffer.deleteRange(
+          startCoords.row,
+          startCoords.col,
+          endCoords.row,
+          endCoords.col,
+        );
         this.editBuffer.setCursor(startCoords.row, startCoords.col);
       }
     }
@@ -290,30 +318,31 @@ export class VimTextareaRenderable extends TextareaRenderable {
 
   private handleReplaceChar(key: KeyEvent): boolean {
     this._waitingForChar = null;
-    
+
     // Cancel on escape
     if (key.name === "escape") {
       return true;
     }
-    
+
     // Get the character to replace with
     // Use key.char if available, otherwise use key.name for single chars
-    const char = key.char ?? (key.name?.length === 1 ? key.name : null);
-    
+    const char = key.name?.length === 1 ? key.name : null;
+
     if (char && char.length === 1 && !key.ctrl && !key.meta) {
       const cursor = this.logicalCursor;
       const lineLen = this.getCurrentLineLength();
-      
+
       if (cursor.col < lineLen) {
         // Delete current char and insert new one
         this.deleteChar();
         this.insertChar(char);
         // Move back to stay on the replaced char
         this.editBuffer.setCursor(cursor.row, cursor.col);
+        this.notifyContentChange();
       }
       return true;
     }
-    
+
     return true; // Consume the key even if we don't act on it
   }
 
@@ -332,6 +361,7 @@ export class VimTextareaRenderable extends TextareaRenderable {
     if (key.name === "u" && !key.ctrl) {
       this._pendingOperator = null;
       this.undo();
+      this.notifyContentChange();
       return true;
     }
 
@@ -339,6 +369,7 @@ export class VimTextareaRenderable extends TextareaRenderable {
     if (key.name === "r" && key.ctrl) {
       this._pendingOperator = null;
       this.redo();
+      this.notifyContentChange();
       return true;
     }
 
@@ -354,6 +385,7 @@ export class VimTextareaRenderable extends TextareaRenderable {
         // dd - delete line
         this.deleteLine();
         this._pendingOperator = null;
+        this.notifyContentChange();
         return true;
       }
       // Any other key cancels the pending operator
@@ -435,6 +467,7 @@ export class VimTextareaRenderable extends TextareaRenderable {
       // Insert newline - cursor moves to new line
       this.newLine();
       this.setMode("insert");
+      this.notifyContentChange();
       return true;
     }
 
@@ -450,6 +483,7 @@ export class VimTextareaRenderable extends TextareaRenderable {
       // We need to go back up to the empty line we created
       this.editBuffer.setCursor(currentRow, 0);
       this.setMode("insert");
+      this.notifyContentChange();
       return true;
     }
 
@@ -522,6 +556,7 @@ export class VimTextareaRenderable extends TextareaRenderable {
     if (key.name === "x" && !key.shift) {
       // Delete character under cursor
       this.deleteChar();
+      this.notifyContentChange();
       return true;
     }
 
@@ -534,6 +569,7 @@ export class VimTextareaRenderable extends TextareaRenderable {
     if (key.name === "D" || (key.name === "d" && key.shift)) {
       // Delete to end of line
       this.deleteToLineEnd();
+      this.notifyContentChange();
       return true;
     }
 
@@ -554,17 +590,19 @@ export class VimTextareaRenderable extends TextareaRenderable {
     if (key.name === "p" && !key.shift) {
       // p - paste after cursor
       this.pasteAfter();
+      this.notifyContentChange();
       return true;
     }
 
     if (key.name === "P" || (key.name === "p" && key.shift)) {
       // P - paste before cursor
       this.pasteBefore();
+      this.notifyContentChange();
       return true;
     }
 
     // ─── Replace char ───
-    if ((key.name === "r" || key.char === "r") && !key.shift && !key.ctrl) {
+    if (key.name === "r" && !key.shift && !key.ctrl) {
       // r - wait for next char to replace current char
       this._waitingForChar = "r";
       return true;
@@ -572,8 +610,12 @@ export class VimTextareaRenderable extends TextareaRenderable {
 
     // ─── Visual mode ───
     // Check for uppercase V first (visual line mode)
-    const isUpperV = key.name === "V" || (key as any).char === "V" || (key.name === "v" && key.shift);
-    const isLowerV = (key.name === "v" || (key as any).char === "v") && !isUpperV;
+    const isUpperV =
+      key.name === "V" ||
+      (key as any).char === "V" ||
+      (key.name === "v" && key.shift);
+    const isLowerV =
+      (key.name === "v" || (key as any).char === "v") && !isUpperV;
 
     if (isUpperV) {
       // V - enter visual line mode and select entire current line
@@ -588,7 +630,7 @@ export class VimTextareaRenderable extends TextareaRenderable {
     }
 
     if (isLowerV) {
-      // v - enter visual mode  
+      // v - enter visual mode
       const cursor = this.logicalCursor;
       this._visualAnchor = { anchorRow: cursor.row, anchorCol: cursor.col };
       this.setMode("visual");
@@ -616,7 +658,11 @@ export class VimTextareaRenderable extends TextareaRenderable {
     }
 
     // Delegate to parent's handleKeyPress for normal text editing
-    return super.handleKeyPress(key);
+    const result = super.handleKeyPress(key);
+    if (result) {
+      this.notifyContentChange();
+    }
+    return result;
   }
 
   // ─────────────────────────────────────────────────────────────
@@ -636,8 +682,8 @@ export class VimTextareaRenderable extends TextareaRenderable {
     }
 
     // Switch between visual modes
-    const isUpperV = key.name === "V" || key.char === "V" || (key.name === "v" && key.shift);
-    const isLowerV = (key.name === "v" || key.char === "v") && !isUpperV;
+    const isUpperV = key.name === "V" || (key.name === "v" && key.shift);
+    const isLowerV = key.name === "v" && !isUpperV;
 
     if (isUpperV) {
       if (this._mode === "visual-line") {
@@ -742,6 +788,7 @@ export class VimTextareaRenderable extends TextareaRenderable {
       this.yankVisualSelection();
       this.deleteVisualSelection();
       this.setMode("normal");
+      this.notifyContentChange();
       return true;
     }
 
@@ -750,6 +797,7 @@ export class VimTextareaRenderable extends TextareaRenderable {
       this.yankVisualSelection();
       this.deleteVisualSelection();
       this.setMode("normal");
+      this.notifyContentChange();
       return true;
     }
 
@@ -758,6 +806,7 @@ export class VimTextareaRenderable extends TextareaRenderable {
       this.yankVisualSelection();
       this.deleteVisualSelection();
       this.setMode("insert");
+      this.notifyContentChange();
       return true;
     }
 
@@ -774,5 +823,13 @@ export class VimTextareaRenderable extends TextareaRenderable {
 
   public get onModeChange(): ((mode: VimMode) => void) | undefined {
     return this._modeChangeListener;
+  }
+
+  public set onBufferChange(handler: ((content: string) => void) | undefined) {
+    this._bufferChangeListener = handler;
+  }
+
+  public get onBufferChange(): ((content: string) => void) | undefined {
+    return this._bufferChangeListener;
   }
 }

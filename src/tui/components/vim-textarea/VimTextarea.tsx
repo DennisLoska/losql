@@ -16,7 +16,7 @@ export interface VimTextareaProps {
   placeholder?: string;
   wrapMode?: "none" | "char" | "word";
   onModeChange?: (mode: VimMode) => void;
-  onContentChange?: () => void;
+  onBufferChange?: (content: string) => void;
   onCursorChange?: (event: { line: number; visualColumn: number }) => void;
   width?: number | string;
   height?: number | string;
@@ -37,7 +37,7 @@ export const VimTextarea: Component<VimTextareaProps> = (props) => {
       placeholder={props.placeholder}
       wrapMode={props.wrapMode}
       onModeChange={props.onModeChange}
-      onContentChange={props.onContentChange}
+      onBufferChange={props.onBufferChange}
       onCursorChange={props.onCursorChange}
       width={props.width}
       height={props.height}
