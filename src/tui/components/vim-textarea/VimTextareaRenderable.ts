@@ -7,7 +7,17 @@ import {
   type RenderContext,
 } from "@opentui/core";
 
-export type VimMode = "normal" | "insert";
+export type VimMode = "normal" | "insert" | "visual" | "visual-line";
+
+export interface YankRegister {
+  text: string;
+  isLinewise: boolean; // true if yanked with yy/Y/V, affects paste behavior
+}
+
+export interface VisualSelection {
+  anchorRow: number;
+  anchorCol: number;
+}
 
 export interface VimTextareaOptions extends TextareaOptions {
   onModeChange?: (mode: VimMode) => void;
@@ -17,6 +27,9 @@ export class VimTextareaRenderable extends TextareaRenderable {
   private _mode: VimMode = "normal";
   private _modeChangeListener?: (mode: VimMode) => void;
   private _pendingOperator: string | null = null; // For dd, yy, etc.
+  private _yankRegister: YankRegister = { text: "", isLinewise: false };
+  private _visualAnchor: VisualSelection | null = null;
+  private _waitingForChar: string | null = null; // For r command
 
   // Cursor styles per mode
   private readonly _normalCursor: CursorStyleOptions = {
@@ -26,6 +39,10 @@ export class VimTextareaRenderable extends TextareaRenderable {
   private readonly _insertCursor: CursorStyleOptions = {
     style: "line",
     blinking: true,
+  };
+  private readonly _visualCursor: CursorStyleOptions = {
+    style: "block",
+    blinking: false,
   };
 
   constructor(ctx: RenderContext, options: VimTextareaOptions) {
@@ -45,8 +62,17 @@ export class VimTextareaRenderable extends TextareaRenderable {
   private setMode(mode: VimMode): void {
     if (this._mode === mode) return;
 
+    // Clear visual selection when leaving visual modes
+    if ((this._mode === "visual" || this._mode === "visual-line") && 
+        mode !== "visual" && mode !== "visual-line") {
+      this._visualAnchor = null;
+      // Clear the text selection highlight
+      this.clearVisualHighlight();
+    }
+
     this._mode = mode;
     this._pendingOperator = null; // Clear pending operator on mode change
+    this._waitingForChar = null; // Clear waiting state
     this.updateCursorForMode();
 
     if (this._modeChangeListener) {
@@ -57,8 +83,18 @@ export class VimTextareaRenderable extends TextareaRenderable {
   }
 
   private updateCursorForMode(): void {
-    const cursorStyle =
-      this._mode === "normal" ? this._normalCursor : this._insertCursor;
+    let cursorStyle: CursorStyleOptions;
+    switch (this._mode) {
+      case "insert":
+        cursorStyle = this._insertCursor;
+        break;
+      case "visual":
+      case "visual-line":
+        cursorStyle = this._visualCursor;
+        break;
+      default:
+        cursorStyle = this._normalCursor;
+    }
     this.cursorStyle = cursorStyle;
   }
 
@@ -75,11 +111,19 @@ export class VimTextareaRenderable extends TextareaRenderable {
   }
 
   public override handleKeyPress(key: KeyEvent): boolean {
+    // Handle waiting for character (r command)
+    if (this._waitingForChar === "r") {
+      return this.handleReplaceChar(key);
+    }
+
     switch (this._mode) {
       case "normal":
         return this.handleNormalMode(key);
       case "insert":
         return this.handleInsertMode(key);
+      case "visual":
+      case "visual-line":
+        return this.handleVisualMode(key);
       default:
         return false;
     }
@@ -101,6 +145,176 @@ export class VimTextareaRenderable extends TextareaRenderable {
 
   private isCurrentLineEmpty(): boolean {
     return this.getCurrentLineLength() === 0;
+  }
+
+  private getCurrentLine(): string {
+    const lines = this.getLines();
+    const cursor = this.logicalCursor;
+    return lines[cursor.row] ?? "";
+  }
+
+  private getLineAt(row: number): string {
+    const lines = this.getLines();
+    return lines[row] ?? "";
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // VISUAL MODE HELPERS
+  // ─────────────────────────────────────────────────────────────
+
+  private clearVisualHighlight(): void {
+    this._ctx.clearSelection();
+    this.requestRender();
+  }
+
+  private startVisualSelection(): void {
+    // To start visual selection, we do a "null" movement - move right then left
+    // This triggers the parent's selection mechanism properly
+    this.moveCursorRight({ select: true });
+    this.moveCursorLeft({ select: true });
+  }
+
+  private updateVisualHighlight(): void {
+    // Visual highlighting is handled by the parent's selection mechanism
+    // when we use movement methods with { select: true }
+    // This method now just ensures render is requested
+    this.requestRender();
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // YANK/PASTE HELPERS
+  // ─────────────────────────────────────────────────────────────
+
+  private yankLine(): void {
+    const line = this.getCurrentLine();
+    this._yankRegister = { text: line, isLinewise: true };
+  }
+
+  private yankToEndOfLine(): void {
+    const cursor = this.logicalCursor;
+    const line = this.getCurrentLine();
+    const text = line.substring(cursor.col);
+    this._yankRegister = { text, isLinewise: false };
+  }
+
+  private yankVisualSelection(): void {
+    const text = this.getSelectedText();
+    const isLinewise = this._mode === "visual-line";
+    this._yankRegister = { text, isLinewise };
+  }
+
+  private pasteAfter(): void {
+    if (!this._yankRegister.text) return;
+    
+    const cursor = this.logicalCursor;
+    
+    if (this._yankRegister.isLinewise) {
+      // Paste on new line below
+      const lineLen = this.getCurrentLineLength();
+      this.editBuffer.setCursor(cursor.row, lineLen);
+      this.newLine();
+      this.insertText(this._yankRegister.text);
+      // Move to start of pasted content
+      this.editBuffer.setCursor(cursor.row + 1, 0);
+    } else {
+      // Paste after cursor
+      if (!this.isCurrentLineEmpty()) {
+        this.editBuffer.setCursor(cursor.row, cursor.col + 1);
+      }
+      this.insertText(this._yankRegister.text);
+    }
+  }
+
+  private pasteBefore(): void {
+    if (!this._yankRegister.text) return;
+    
+    const cursor = this.logicalCursor;
+    
+    if (this._yankRegister.isLinewise) {
+      // Paste on new line above
+      this.editBuffer.setCursor(cursor.row, 0);
+      this.newLine();
+      this.editBuffer.setCursor(cursor.row, 0);
+      this.insertText(this._yankRegister.text);
+      // Move to start of pasted content
+      this.editBuffer.setCursor(cursor.row, 0);
+    } else {
+      // Paste at cursor
+      this.insertText(this._yankRegister.text);
+    }
+  }
+
+  private deleteVisualSelection(): void {
+    const selection = this.getSelection();
+    if (!selection) return;
+    
+    // Get the start position for cursor placement after delete
+    const startPos = this.editBuffer.offsetToPosition(selection.start);
+    
+    // Delete the selected range
+    if (this._mode === "visual-line") {
+      // For line-wise, we need to delete full lines
+      const startLinePos = this.editBuffer.offsetToPosition(selection.start);
+      const endLinePos = this.editBuffer.offsetToPosition(selection.end);
+      if (startLinePos && endLinePos) {
+        // Delete from start of first line to end of last line (including newline)
+        const startOffset = this.editBuffer.positionToOffset(startLinePos.row, 0);
+        const lines = this.getLines();
+        const endLineLen = lines[endLinePos.row]?.length ?? 0;
+        let endOffset = this.editBuffer.positionToOffset(endLinePos.row, endLineLen);
+        // Include the newline if not at end of buffer
+        if (endLinePos.row < lines.length - 1) {
+          endOffset += 1;
+        }
+        const startCoords = this.editBuffer.offsetToPosition(startOffset);
+        const endCoords = this.editBuffer.offsetToPosition(endOffset);
+        if (startCoords && endCoords) {
+          this.editBuffer.deleteRange(startCoords.row, startCoords.col, endCoords.row, endCoords.col);
+        }
+        this.editBuffer.setCursor(startLinePos.row, 0);
+      }
+    } else {
+      // Character-wise delete
+      const startCoords = this.editBuffer.offsetToPosition(selection.start);
+      const endCoords = this.editBuffer.offsetToPosition(selection.end);
+      if (startCoords && endCoords) {
+        this.editBuffer.deleteRange(startCoords.row, startCoords.col, endCoords.row, endCoords.col);
+        this.editBuffer.setCursor(startCoords.row, startCoords.col);
+      }
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // REPLACE CHAR HANDLER
+  // ─────────────────────────────────────────────────────────────
+
+  private handleReplaceChar(key: KeyEvent): boolean {
+    this._waitingForChar = null;
+    
+    // Cancel on escape
+    if (key.name === "escape") {
+      return true;
+    }
+    
+    // Get the character to replace with
+    // Use key.char if available, otherwise use key.name for single chars
+    const char = key.char ?? (key.name?.length === 1 ? key.name : null);
+    
+    if (char && char.length === 1 && !key.ctrl && !key.meta) {
+      const cursor = this.logicalCursor;
+      const lineLen = this.getCurrentLineLength();
+      
+      if (cursor.col < lineLen) {
+        // Delete current char and insert new one
+        this.deleteChar();
+        this.insertChar(char);
+        // Move back to stay on the replaced char
+        this.editBuffer.setCursor(cursor.row, cursor.col);
+      }
+      return true;
+    }
+    
+    return true; // Consume the key even if we don't act on it
   }
 
   // ─────────────────────────────────────────────────────────────
@@ -139,6 +353,18 @@ export class VimTextareaRenderable extends TextareaRenderable {
       if (key.name === "d") {
         // dd - delete line
         this.deleteLine();
+        this._pendingOperator = null;
+        return true;
+      }
+      // Any other key cancels the pending operator
+      this._pendingOperator = null;
+      // Fall through to process the key normally
+    }
+
+    if (this._pendingOperator === "y") {
+      if (key.name === "y") {
+        // yy - yank line
+        this.yankLine();
         this._pendingOperator = null;
         return true;
       }
@@ -302,6 +528,64 @@ export class VimTextareaRenderable extends TextareaRenderable {
       return true;
     }
 
+    // ─── Yank operators ───
+    if (key.name === "y" && !key.shift) {
+      // Start pending operator for yy
+      this._pendingOperator = "y";
+      return true;
+    }
+
+    if (key.name === "Y" || (key.name === "y" && key.shift)) {
+      // Y - yank to end of line (like D but for yank)
+      this.yankToEndOfLine();
+      return true;
+    }
+
+    // ─── Paste operators ───
+    if (key.name === "p" && !key.shift) {
+      // p - paste after cursor
+      this.pasteAfter();
+      return true;
+    }
+
+    if (key.name === "P" || (key.name === "p" && key.shift)) {
+      // P - paste before cursor
+      this.pasteBefore();
+      return true;
+    }
+
+    // ─── Replace char ───
+    if ((key.name === "r" || key.char === "r") && !key.shift && !key.ctrl) {
+      // r - wait for next char to replace current char
+      this._waitingForChar = "r";
+      return true;
+    }
+
+    // ─── Visual mode ───
+    // Check for uppercase V first (visual line mode)
+    const isUpperV = key.name === "V" || (key as any).char === "V" || (key.name === "v" && key.shift);
+    const isLowerV = (key.name === "v" || (key as any).char === "v") && !isUpperV;
+
+    if (isUpperV) {
+      // V - enter visual line mode and select entire current line
+      const cursor = this.logicalCursor;
+      this._visualAnchor = { anchorRow: cursor.row, anchorCol: 0 };
+      this.setMode("visual-line");
+      // Move cursor to start of line directly (without clearing selection)
+      this.editBuffer.setCursor(cursor.row, 0);
+      // Now select to end of line
+      this.gotoLineEnd({ select: true });
+      return true;
+    }
+
+    if (isLowerV) {
+      // v - enter visual mode  
+      const cursor = this.logicalCursor;
+      this._visualAnchor = { anchorRow: cursor.row, anchorCol: cursor.col };
+      this.setMode("visual");
+      return true;
+    }
+
     return false;
   }
 
@@ -324,6 +608,142 @@ export class VimTextareaRenderable extends TextareaRenderable {
 
     // Delegate to parent's handleKeyPress for normal text editing
     return super.handleKeyPress(key);
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // VISUAL MODE
+  // ─────────────────────────────────────────────────────────────
+
+  private handleVisualMode(key: KeyEvent): boolean {
+    // Don't process keys with meta/super modifiers
+    if (key.meta || key.super) {
+      return false;
+    }
+
+    // Escape to normal mode
+    if (key.name === "escape") {
+      this.setMode("normal");
+      return true;
+    }
+
+    // Switch between visual modes
+    const isUpperV = key.name === "V" || key.char === "V" || (key.name === "v" && key.shift);
+    const isLowerV = (key.name === "v" || key.char === "v") && !isUpperV;
+
+    if (isUpperV) {
+      if (this._mode === "visual-line") {
+        // Already in visual-line mode, exit
+        this.setMode("normal");
+      } else {
+        // Switch from visual to visual-line
+        this.setMode("visual-line");
+      }
+      return true;
+    }
+
+    if (isLowerV) {
+      if (this._mode === "visual") {
+        // Already in visual mode, exit
+        this.setMode("normal");
+      } else {
+        // Switch from visual-line to visual
+        this.setMode("visual");
+      }
+      return true;
+    }
+
+    // ─── Motions (extend selection) ───
+    if (key.name === "h" || key.name === "left") {
+      this.moveCursorLeft({ select: true });
+      return true;
+    }
+
+    if (key.name === "j" || key.name === "down") {
+      this.moveCursorDown({ select: true });
+      return true;
+    }
+
+    if (key.name === "k" || key.name === "up") {
+      this.moveCursorUp({ select: true });
+      return true;
+    }
+
+    if (key.name === "l" || key.name === "right") {
+      this.moveCursorRight({ select: true });
+      return true;
+    }
+
+    if (key.name === "0") {
+      this.gotoLineHome({ select: true });
+      return true;
+    }
+
+    if (key.name === "$" || (key.name === "4" && key.shift)) {
+      this.gotoLineEnd({ select: true });
+      return true;
+    }
+
+    if (key.name === "w" && !key.shift) {
+      this.moveWordForward({ select: true });
+      return true;
+    }
+
+    if (key.name === "b" && !key.shift) {
+      this.moveWordBackward({ select: true });
+      return true;
+    }
+
+    if (key.name === "G" || (key.name === "g" && key.shift)) {
+      this.gotoBufferEnd({ select: true });
+      return true;
+    }
+
+    // gg in visual mode
+    if (key.name === "g" && !key.shift) {
+      this._pendingOperator = "g";
+      return true;
+    }
+
+    // Handle pending g for gg
+    if (this._pendingOperator === "g" && key.name === "g") {
+      this.gotoBufferHome({ select: true });
+      this._pendingOperator = null;
+      return true;
+    }
+
+    // ─── Operators on selection ───
+    if (key.name === "y" && !key.shift) {
+      // Yank selection
+      this.yankVisualSelection();
+      this.setMode("normal");
+      return true;
+    }
+
+    if (key.name === "d" && !key.shift) {
+      // Delete selection (and yank it)
+      this.yankVisualSelection();
+      this.deleteVisualSelection();
+      this.setMode("normal");
+      return true;
+    }
+
+    if (key.name === "x" && !key.shift) {
+      // Delete selection (same as d in visual mode)
+      this.yankVisualSelection();
+      this.deleteVisualSelection();
+      this.setMode("normal");
+      return true;
+    }
+
+    if (key.name === "c" && !key.shift) {
+      // Change selection (delete and enter insert mode)
+      this.yankVisualSelection();
+      this.deleteVisualSelection();
+      this.setMode("insert");
+      return true;
+    }
+
+    return false;
   }
 
   // ─────────────────────────────────────────────────────────────
