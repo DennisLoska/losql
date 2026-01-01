@@ -37,6 +37,8 @@ export namespace Server {
   }
 
   export async function stop() {
-    await server.stop();
+    if (server) {
+      await server.stop();
+    }
   }
 }
