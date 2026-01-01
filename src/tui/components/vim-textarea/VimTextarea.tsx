@@ -1,7 +1,7 @@
 import { extend } from "@opentui/solid";
 import { VimTextareaRenderable, type VimMode } from "./VimTextareaRenderable";
 import type { Component } from "solid-js";
-import type { ColorInput, KeyEvent } from "@opentui/core";
+import type { ColorInput, KeyEvent, SyntaxStyle } from "@opentui/core";
 
 extend({ vim_textarea: VimTextareaRenderable });
 
@@ -25,6 +25,8 @@ export interface VimTextareaProps {
   height?: number | string;
   flexGrow?: number;
   flexShrink?: number;
+  filetype?: string;
+  syntaxStyle?: SyntaxStyle;
 }
 
 export const VimTextarea: Component<VimTextareaProps> = (props) => {
@@ -49,6 +51,8 @@ export const VimTextarea: Component<VimTextareaProps> = (props) => {
       height={props.height}
       flexGrow={props.flexGrow}
       flexShrink={props.flexShrink}
+      filetype={props.filetype}
+      syntaxStyle={props.syntaxStyle}
     />
   );
 };

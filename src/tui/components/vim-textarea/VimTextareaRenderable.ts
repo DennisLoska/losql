@@ -5,6 +5,8 @@ import {
   type PasteEvent,
   type CursorStyleOptions,
   type RenderContext,
+  getTreeSitterClient,
+  SyntaxStyle,
 } from "@opentui/core";
 
 export type VimMode = "normal" | "insert" | "visual" | "visual-line";
@@ -25,6 +27,8 @@ export interface VimTextareaOptions extends TextareaOptions {
   onKeyDown?: (key: KeyEvent) => void;
   onNormalModeKeyDown?: (key: KeyEvent) => void;
   value?: string; // Controlled value - updates buffer when changed
+  filetype: string;
+  syntaxStyle: SyntaxStyle;
 }
 
 export class VimTextareaRenderable extends TextareaRenderable {
@@ -38,6 +42,8 @@ export class VimTextareaRenderable extends TextareaRenderable {
   private _visualAnchor: VisualSelection | null = null;
   private _waitingForChar: string | null = null; // For r command
   private _lastExternalValue: string | undefined; // Track external value changes
+  private _filetype: string;
+  private _syntaxStyle: SyntaxStyle;
 
   // Cursor styles per mode
   private readonly _normalCursor: CursorStyleOptions = {
@@ -65,9 +71,73 @@ export class VimTextareaRenderable extends TextareaRenderable {
     this._normalModeKeyDownListener = options.onNormalModeKeyDown;
     this._lastExternalValue = options.value ?? options.initialValue;
     this.updateCursorForMode();
+
+    this._filetype = options.filetype;
+    this._syntaxStyle = options.syntaxStyle;
   }
 
-  private notifyContentChange(): void {
+  private applyHighlights() {
+    if (!this._filetype || !this._syntaxStyle) return;
+    this.editBuffer.clearAllHighlights();
+
+    getTreeSitterClient()
+      .highlightOnce(this.plainText, this._filetype)
+      .then((result) => {
+        // Filter out duplicate ranges - keep only the first capture per range
+        const seen = new Set<string>();
+        for (const [start, end, captureName] of result.highlights ?? []) {
+          const key = `${start}-${end}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+
+          const styleId = this._syntaxStyle.resolveStyleId(captureName);
+          if (styleId != null) {
+            // Convert character offsets to line-relative offsets
+            const startPos = this.editBuffer.offsetToPosition(start);
+            const endPos = this.editBuffer.offsetToPosition(end);
+
+            if (startPos && endPos) {
+              if (startPos.row === endPos.row) {
+                // Single line highlight
+                this.editBuffer.addHighlight(startPos.row, {
+                  start: startPos.col,
+                  end: endPos.col,
+                  styleId,
+                });
+              } else {
+                // Multi-line highlight - add to each line
+                // First line: from startCol to end of line
+                const firstLineLen = this.getLineAt(startPos.row).length;
+                this.editBuffer.addHighlight(startPos.row, {
+                  start: startPos.col,
+                  end: firstLineLen,
+                  styleId,
+                });
+                // Middle lines: full line
+                for (let row = startPos.row + 1; row < endPos.row; row++) {
+                  const lineLen = this.getLineAt(row).length;
+                  this.editBuffer.addHighlight(row, {
+                    start: 0,
+                    end: lineLen,
+                    styleId,
+                  });
+                }
+                // Last line: from start to endCol
+                this.editBuffer.addHighlight(endPos.row, {
+                  start: 0,
+                  end: endPos.col,
+                  styleId,
+                });
+              }
+            }
+          }
+        }
+        this.requestRender();
+      });
+  }
+
+  private notifyContentChange() {
+    this.applyHighlights();
     if (this._bufferChangeListener) {
       this._bufferChangeListener(this.plainText);
     }
@@ -870,6 +940,17 @@ export class VimTextareaRenderable extends TextareaRenderable {
     return this._normalModeKeyDownListener;
   }
 
+  public set filetype(value: string) {
+    this._filetype = value;
+    this.applyHighlights();
+  }
+
+  public override set syntaxStyle(value: SyntaxStyle) {
+    this._syntaxStyle = value;
+    this.editBuffer.setSyntaxStyle(value);
+    this.applyHighlights();
+  }
+
   // Setter for controlled value - updates buffer when value changes externally
   public set value(newValue: string | undefined) {
     if (newValue === undefined) return;
@@ -879,6 +960,7 @@ export class VimTextareaRenderable extends TextareaRenderable {
     if (newValue !== this._lastExternalValue && newValue !== this.plainText) {
       this._lastExternalValue = newValue;
       this.replaceText(newValue);
+      this.applyHighlights();
       this.requestRender();
     }
   }

@@ -1,8 +1,9 @@
 import { render } from "@opentui/solid";
 import { createSignal, Show } from "solid-js";
 import { VimTextarea } from "./components/vim-textarea";
-import { parseColor, SyntaxStyle, type KeyEvent } from "@opentui/core";
+import { getTreeSitterClient, type KeyEvent } from "@opentui/core";
 import { fetch } from "bun";
+import { tokyoNightStyle } from "./theme";
 
 type SqlResponse = {
   results?: Record<string, unknown>[] | null;
@@ -10,19 +11,23 @@ type SqlResponse = {
   error?: string | null;
 };
 
-const tokyoNightStyle = SyntaxStyle.fromStyles({
-  string: { fg: parseColor("#9ece6a") },
-  number: { fg: parseColor("#ff9e64") },
-  "constant.builtin": { fg: parseColor("#ff9e64") },
-  "punctuation.bracket": { fg: parseColor("#a9b1d6") },
-  "punctuation.delimiter": { fg: parseColor("#89ddff") },
-  property: { fg: parseColor("#7aa2f7") },
-  keyword: { fg: parseColor("#bb9af7") },
-  comment: { fg: parseColor("#565f89"), italic: true },
-  function: { fg: parseColor("#7aa2f7") },
-  variable: { fg: parseColor("#c0caf5") },
-  operator: { fg: parseColor("#89ddff") },
-  type: { fg: parseColor("#2ac3de") },
+const client = getTreeSitterClient();
+await client.initialize();
+
+// Unfortunately there is no official parser for SQL yet so that's
+// as good as it gets! The wasm and highlights from m-novikov are
+// not compatible / broken so I had to define highlights manually
+const sqlHighlightsPath = new URL(
+  "./sql-parser/queries/sql-highlights.scm",
+  import.meta.url,
+).pathname;
+
+client.addFiletypeParser({
+  filetype: "sql",
+  wasm: "https://github.com/m-novikov/tree-sitter-sql/raw/main/docs/tree-sitter-sql.wasm",
+  queries: {
+    highlights: [sqlHighlightsPath],
+  },
 });
 
 const App = () => {
@@ -100,8 +105,11 @@ const App = () => {
       });
       return;
     }
+
+    const json = (await res.json()) as SqlResponse;
+
     setHideReport(false);
-    setResult((await res.json()) as SqlResponse);
+    setResult(json as SqlResponse);
   }
 
   return (
@@ -129,13 +137,14 @@ const App = () => {
             onBufferChange={setQuery}
             onNormalModeKeyDown={handleEditor}
             height="auto"
+            filetype="sql"
+            syntaxStyle={tokyoNightStyle}
           />
         </box>
         <box
           borderColor={focus() === "results" ? "orange" : "white"}
           border
           height="auto"
-          maxHeight="95%"
           flexGrow={1}
           overflow="scroll"
         >
@@ -145,25 +154,27 @@ const App = () => {
               value={JSON.stringify(result()?.results, null, 2)}
               cursorColor="orange"
               onNormalModeKeyDown={handleResults}
+              filetype="typescript"
+              syntaxStyle={tokyoNightStyle}
               height="auto"
             />
           </Show>
           <Show when={result()?.error}>
-            <scrollbox focused={focus() === "results"} onKeyDown={handleError}>
-              <code
-                content={JSON.stringify(result()?.error, undefined, 2)}
-                filetype="javascript"
-                syntaxStyle={tokyoNightStyle}
-              />
-            </scrollbox>
+            <VimTextarea
+              focused={focus() === "results"}
+              value={JSON.stringify(result()?.error, undefined, 2)}
+              cursorColor="orange"
+              onNormalModeKeyDown={handleError}
+              filetype="typescript"
+              syntaxStyle={tokyoNightStyle}
+              height="auto"
+            />
           </Show>
         </box>
       </box>
 
       <Show when={!hideReport()}>
-        <scrollbox
-          focused={focus() === "report"}
-          onKeyDown={handleReport}
+        <box
           focusedBorderColor="orange"
           border
           width="30%"
@@ -171,14 +182,16 @@ const App = () => {
           overflow="scroll"
           flexDirection="column"
         >
-          <Show when={result()?.report}>
-            <code
-              content={JSON.stringify(result()?.report?.[0], undefined, 2)}
-              filetype="javascript"
-              syntaxStyle={tokyoNightStyle}
-            />
-          </Show>
-        </scrollbox>
+          <VimTextarea
+            focused={focus() === "report"}
+            value={JSON.stringify(result()?.report?.[0], undefined, 2)}
+            cursorColor="orange"
+            onNormalModeKeyDown={handleReport}
+            filetype="typescript"
+            syntaxStyle={tokyoNightStyle}
+            height="auto"
+          />
+        </box>
       </Show>
     </box>
   );
