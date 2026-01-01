@@ -41,7 +41,7 @@ const App = () => {
       setFocus("results");
     }
 
-    if (key.shift && key.name === "l") {
+    if (key.shift && key.name === "l" && !hideReport()) {
       setFocus("report");
     }
 
@@ -56,7 +56,7 @@ const App = () => {
       setFocus("editor");
     }
 
-    if (key.shift && key.name === "l") {
+    if (key.shift && key.name === "l" && !hideReport()) {
       setFocus("report");
     }
 
@@ -120,7 +120,7 @@ const App = () => {
           borderColor={focus() === "editor" ? "orange" : "white"}
           minHeight="5%"
           maxHeight="35%"
-          paddingLeft="1%"
+          paddingLeft={1}
         >
           <VimTextarea
             focused={focus() === "editor"}
