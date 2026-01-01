@@ -1,10 +1,10 @@
 import { sql } from "bun";
 
-namespace Server {
-  export async function start() {
-    console.log("Losql server started");
+export namespace Server {
+  let server: Bun.Server<undefined>;
 
-    Bun.serve({
+  export async function start() {
+    server = Bun.serve({
       port: 3000,
       routes: {
         "/api/sql": async (req) => {
@@ -35,6 +35,8 @@ namespace Server {
       },
     });
   }
-}
 
-Server.start();
+  export async function stop() {
+    await server.stop();
+  }
+}
