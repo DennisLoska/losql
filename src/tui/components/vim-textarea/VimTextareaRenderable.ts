@@ -24,6 +24,7 @@ export interface VimTextareaOptions extends TextareaOptions {
   onBufferChange?: (content: string) => void;
   onKeyDown?: (key: KeyEvent) => void;
   onNormalModeKeyDown?: (key: KeyEvent) => void;
+  value?: string; // Controlled value - updates buffer when changed
 }
 
 export class VimTextareaRenderable extends TextareaRenderable {
@@ -36,6 +37,7 @@ export class VimTextareaRenderable extends TextareaRenderable {
   private _yankRegister: YankRegister = { text: "", isLinewise: false };
   private _visualAnchor: VisualSelection | null = null;
   private _waitingForChar: string | null = null; // For r command
+  private _lastExternalValue: string | undefined; // Track external value changes
 
   // Cursor styles per mode
   private readonly _normalCursor: CursorStyleOptions = {
@@ -61,6 +63,7 @@ export class VimTextareaRenderable extends TextareaRenderable {
     this._bufferChangeListener = options.onBufferChange;
     this._keyDownListener = options.onKeyDown;
     this._normalModeKeyDownListener = options.onNormalModeKeyDown;
+    this._lastExternalValue = options.value ?? options.initialValue;
     this.updateCursorForMode();
   }
 
@@ -367,10 +370,6 @@ export class VimTextareaRenderable extends TextareaRenderable {
       return false;
     }
 
-    Bun.write(
-      "/tmp/losql-logs",
-      JSON.stringify({ listener: this._normalModeKeyDownListener }),
-    );
     if (this._normalModeKeyDownListener) {
       this._normalModeKeyDownListener(key);
     }
@@ -869,5 +868,22 @@ export class VimTextareaRenderable extends TextareaRenderable {
 
   public get onNormalModeKeyDown(): ((key: KeyEvent) => void) | undefined {
     return this._normalModeKeyDownListener;
+  }
+
+  // Setter for controlled value - updates buffer when value changes externally
+  public set value(newValue: string | undefined) {
+    if (newValue === undefined) return;
+
+    // Only update if the value actually changed from the last external value
+    // This prevents overwriting user edits when the signal updates from onBufferChange
+    if (newValue !== this._lastExternalValue && newValue !== this.plainText) {
+      this._lastExternalValue = newValue;
+      this.replaceText(newValue);
+      this.requestRender();
+    }
+  }
+
+  public get value(): string | undefined {
+    return this.plainText;
   }
 }

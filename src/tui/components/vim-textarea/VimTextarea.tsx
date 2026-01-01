@@ -7,6 +7,7 @@ extend({ vim_textarea: VimTextareaRenderable });
 
 export interface VimTextareaProps {
   initialValue?: string;
+  value?: string; // Controlled value - updates buffer when changed
   focused?: boolean;
   cursorColor?: ColorInput;
   backgroundColor?: ColorInput;
@@ -31,6 +32,7 @@ export const VimTextarea: Component<VimTextareaProps> = (props) => {
     <vim_textarea
       focused={props.focused}
       initialValue={props.initialValue}
+      value={props.value}
       cursorColor={props.cursorColor}
       backgroundColor={props.backgroundColor}
       textColor={props.textColor}

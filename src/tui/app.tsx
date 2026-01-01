@@ -29,6 +29,7 @@ const App = () => {
   const [query, setQuery] = createSignal("SELECT * FROM calls LIMIT 5;");
   const [result, setResult] = createSignal<SqlResponse | null>(null);
   const [focus, setFocus] = createSignal("editor");
+  const [hideReport, setHideReport] = createSignal(true);
 
   function handleEditor(key: KeyEvent) {
     // Ctrl+s to execute query
@@ -39,8 +40,14 @@ const App = () => {
     if (key.shift && key.name === "j") {
       setFocus("results");
     }
+
     if (key.shift && key.name === "l") {
       setFocus("report");
+    }
+
+    if (key.shift && key.name === "e") {
+      setHideReport(!hideReport());
+      if (hideReport() === false) setFocus("report");
     }
   }
 
@@ -48,14 +55,34 @@ const App = () => {
     if (key.shift && key.name === "k") {
       setFocus("editor");
     }
+
     if (key.shift && key.name === "l") {
       setFocus("report");
+    }
+
+    if (key.shift && key.name === "e") {
+      setHideReport(!hideReport());
+      if (hideReport() === false) setFocus("report");
     }
   }
 
   function handleReport(key: KeyEvent) {
     if (key.shift && key.name === "h") {
       setFocus("editor");
+    }
+    if (key.shift && key.name === "e") {
+      setHideReport(!hideReport());
+      setFocus("editor");
+    }
+  }
+
+  function handleError(key: KeyEvent) {
+    if (key.shift && key.name === "k") {
+      setFocus("editor");
+    }
+
+    if (key.shift && key.name === "l") {
+      setFocus("report");
     }
   }
 
@@ -71,7 +98,9 @@ const App = () => {
         report: null,
         error: JSON.stringify({ message: res.statusText, code: res.status }),
       });
+      return;
     }
+    setHideReport(false);
     setResult((await res.json()) as SqlResponse);
   }
 
@@ -102,53 +131,55 @@ const App = () => {
             height="auto"
           />
         </box>
-        <scrollbox
-          focused={focus() === "results"}
-          focusedBorderColor="orange"
-          onKeyDown={handleResults}
+        <box
+          borderColor={focus() === "results" ? "orange" : "white"}
           border
           height="auto"
           maxHeight="95%"
           flexGrow={1}
           overflow="scroll"
         >
-          <Show when={result()?.results}>
-            <code
-              content={JSON.stringify(result()?.results, null, 2)}
-              filetype="javascript"
-              syntaxStyle={tokyoNightStyle}
-              width="100%"
+          <Show when={!result()?.error}>
+            <VimTextarea
+              focused={focus() === "results"}
+              value={JSON.stringify(result()?.results, null, 2)}
+              cursorColor="orange"
+              onNormalModeKeyDown={handleResults}
+              height="auto"
             />
           </Show>
           <Show when={result()?.error}>
+            <scrollbox focused={focus() === "results"} onKeyDown={handleError}>
+              <code
+                content={JSON.stringify(result()?.error, undefined, 2)}
+                filetype="javascript"
+                syntaxStyle={tokyoNightStyle}
+              />
+            </scrollbox>
+          </Show>
+        </box>
+      </box>
+
+      <Show when={!hideReport()}>
+        <scrollbox
+          focused={focus() === "report"}
+          onKeyDown={handleReport}
+          focusedBorderColor="orange"
+          border
+          width="30%"
+          height="100%"
+          overflow="scroll"
+          flexDirection="column"
+        >
+          <Show when={result()?.report}>
             <code
-              content={JSON.stringify(result()?.error, null, 2)}
+              content={JSON.stringify(result()?.report?.[0], undefined, 2)}
               filetype="javascript"
               syntaxStyle={tokyoNightStyle}
-              width="100%"
             />
           </Show>
         </scrollbox>
-      </box>
-
-      <scrollbox
-        focused={focus() === "report"}
-        onKeyDown={handleReport}
-        focusedBorderColor="orange"
-        border
-        width="30%"
-        height="100%"
-        overflow="scroll"
-        flexDirection="column"
-      >
-        <Show when={result()?.report}>
-          <code
-            content={JSON.stringify(result()?.report?.[0], undefined, 2)}
-            filetype="javascript"
-            syntaxStyle={tokyoNightStyle}
-          />
-        </Show>
-      </scrollbox>
+      </Show>
     </box>
   );
 };
