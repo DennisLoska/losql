@@ -179,6 +179,7 @@ const App = () => {
 
       <Show when={!hideReport()}>
         <box
+          borderColor={focus() === "report" ? "orange" : "white"}
           focusedBorderColor="orange"
           border
           width="30%"
