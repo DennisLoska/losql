@@ -126,8 +126,9 @@ const App = () => {
           border
           focusedBorderColor="orange"
           borderColor={focus() === "editor" ? "orange" : "white"}
-          minHeight="5%"
+          minHeight="7%"
           maxHeight="40%"
+          flexWrap="no-wrap"
           paddingLeft={1}
         >
           <VimTextarea
@@ -145,7 +146,10 @@ const App = () => {
           borderColor={focus() === "results" ? "orange" : "white"}
           border
           height="auto"
+          maxHeight="93%"
+          flexShrink={1}
           flexGrow={1}
+          flexWrap="wrap"
           overflow="scroll"
         >
           <Show when={!result()?.error}>
