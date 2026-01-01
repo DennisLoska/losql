@@ -63,4 +63,36 @@ export const tokyoNightStyle = SyntaxStyle.fromStyles({
   // Labels and special
   label: { fg: parseColor("#7dcfff") },
   namespace: { fg: parseColor("#7dcfff") },
+
+  // Markdown
+  "markup.heading": { fg: parseColor("#7aa2f7"), bold: true },
+  "markup.heading.1": { fg: parseColor("#f7768e"), bold: true },
+  "markup.heading.2": { fg: parseColor("#ff9e64"), bold: true },
+  "markup.heading.3": { fg: parseColor("#e0af68"), bold: true },
+  "markup.heading.4": { fg: parseColor("#9ece6a"), bold: true },
+  "markup.heading.5": { fg: parseColor("#7dcfff"), bold: true },
+  "markup.heading.6": { fg: parseColor("#bb9af7"), bold: true },
+  "markup.bold": { fg: parseColor("#c0caf5"), bold: true },
+  "markup.italic": { fg: parseColor("#c0caf5"), italic: true },
+  "markup.strikethrough": { fg: parseColor("#565f89") },
+  "markup.link": { fg: parseColor("#7dcfff"), underline: true },
+  "markup.link.url": { fg: parseColor("#2ac3de"), underline: true },
+  "markup.link.label": { fg: parseColor("#7aa2f7") },
+  "markup.link.text": { fg: parseColor("#7dcfff") },
+  "markup.list": { fg: parseColor("#89ddff") },
+  "markup.list.checked": { fg: parseColor("#9ece6a") },
+  "markup.list.unchecked": { fg: parseColor("#565f89") },
+  "markup.quote": { fg: parseColor("#565f89"), italic: true },
+  "markup.raw": { fg: parseColor("#9ece6a") },
+  "markup.raw.inline": { fg: parseColor("#9ece6a") },
+  "markup.raw.block": { fg: parseColor("#9ece6a") },
+
+  // Text (fallback for markdown content)
+  text: { fg: parseColor("#c0caf5") },
+  "text.emphasis": { fg: parseColor("#c0caf5"), italic: true },
+  "text.strong": { fg: parseColor("#c0caf5"), bold: true },
+  "text.literal": { fg: parseColor("#9ece6a") },
+  "text.uri": { fg: parseColor("#2ac3de"), underline: true },
+  "text.reference": { fg: parseColor("#7aa2f7") },
+  "text.title": { fg: parseColor("#7aa2f7"), bold: true },
 });

@@ -19,7 +19,6 @@ namespace Server {
             const json = JSON.stringify({ results: res, report, error: null });
             return new Response(json);
           } catch (error) {
-            console.log(error);
             return new Response(
               JSON.stringify({ results: null, report: null, error }),
             );

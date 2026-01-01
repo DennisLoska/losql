@@ -1,7 +1,7 @@
-import { render } from "@opentui/solid";
+import { render, useKeyboard } from "@opentui/solid";
 import { createSignal, Show } from "solid-js";
 import { VimTextarea } from "./components/vim-textarea";
-import { getTreeSitterClient, type KeyEvent } from "@opentui/core";
+import { getTreeSitterClient, SyntaxStyle, type KeyEvent } from "@opentui/core";
 import { fetch } from "bun";
 import { tokyoNightStyle } from "./theme";
 
@@ -34,7 +34,14 @@ const App = () => {
   const [query, setQuery] = createSignal("SELECT * FROM calls LIMIT 5;");
   const [result, setResult] = createSignal<SqlResponse | null>(null);
   const [focus, setFocus] = createSignal("editor");
+  const [help, setHelp] = createSignal(false);
   const [hideReport, setHideReport] = createSignal(true);
+
+  useKeyboard((key) => {
+    if (key.name === "?") {
+      setHelp((prev) => !prev);
+    }
+  });
 
   function handleEditor(key: KeyEvent) {
     // Ctrl+s to execute query
@@ -112,8 +119,47 @@ const App = () => {
     setResult(json as SqlResponse);
   }
 
+  const helpContent = `
+# Key Shortcuts
+
+- \`<?>\`                  - Show help
+
+- \`<CTRL-s>\`             - Execute query (Editor pane)
+- \`<SHIFT-e>\`            - Toggle Query Plan
+- \`<SHIFT-h,j,k,l>\`      - Navigate between panels
+          `;
+
   return (
-    <box height="100%" width="100%" flexDirection="row">
+    <box
+      backgroundColor="#1a1b26"
+      borderColor="#565f89"
+      borderStyle="double"
+      height="100%"
+      width="100%"
+      flexDirection="row"
+    >
+      <Show when={help()}>
+        <box
+          position="absolute"
+          height="40%"
+          width="25%"
+          zIndex={1}
+          left="40%"
+          top="30%"
+          padding={1}
+          paddingTop={0}
+          border
+          borderStyle="double"
+          borderColor="#565f89"
+          backgroundColor="#1a1b26"
+        >
+          <code
+            content={helpContent}
+            syntaxStyle={tokyoNightStyle}
+            filetype="markdown"
+          />
+        </box>
+      </Show>
       <box
         flexDirection="column"
         justifyContent="space-between"
@@ -125,7 +171,8 @@ const App = () => {
         <box
           border
           focusedBorderColor="orange"
-          borderColor={focus() === "editor" ? "orange" : "white"}
+          borderColor={focus() === "editor" ? "orange" : "#565f89"}
+          borderStyle="heavy"
           minHeight="7%"
           maxHeight="40%"
           flexWrap="no-wrap"
@@ -143,8 +190,9 @@ const App = () => {
           />
         </box>
         <box
-          borderColor={focus() === "results" ? "orange" : "white"}
+          borderColor={focus() === "results" ? "orange" : "#565f89"}
           border
+          borderStyle="heavy"
           height="auto"
           maxHeight="93%"
           flexShrink={1}
@@ -179,9 +227,10 @@ const App = () => {
 
       <Show when={!hideReport()}>
         <box
-          borderColor={focus() === "report" ? "orange" : "white"}
+          borderColor={focus() === "report" ? "orange" : "#565f89"}
           focusedBorderColor="orange"
           border
+          borderStyle="heavy"
           width="30%"
           height="100%"
           overflow="scroll"
