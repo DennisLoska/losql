@@ -1,21 +1,21 @@
+MIT License
+
 Copyright (c) 2025 Dennis Loska
 
-END USER LICENSE AGREEMENT (EULA)
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
 
-Permission is hereby granted, free of charge, to any person who lawfully obtains a copy of this software ("the Software") to use the Software as-is, solely for its intended purpose. This includes viewing and executing the Software in its original, unmodified form for its intended use.
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
 
-You MAY:
-- Use and execute the Software as provided for its intended purpose.
-
-You MAY NOT:
-- Copy, modify, merge, adapt, translate, create derivative works of, publish, distribute, sublicense, or sell copies of the Software or any part thereof.
-- Reverse engineer, decompile, disassemble, or otherwise attempt to derive the source code structure, design, or organization of the Software beyond what is already made available.
-- Use the Software, its code, or any portion thereof for the training, development, or evaluation of artificial intelligence systems or models, including but not limited to machine learning models, large language models (LLMs), generative AI, or data mining.
-- Incorporate the Software or any portion thereof in a dataset intended for machine learning, AI, data annotation, or similar purposes.
-- Provide the Software or any portion thereof to any third party for any of the purposes prohibited above.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND NON-INFRINGEMENT. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
-
-Unauthorized use or distribution of the Software is strictly prohibited and may result in legal action.
-
-For any other use, redistribution, or licensing inquiries, please contact the author for explicit written permission.
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
