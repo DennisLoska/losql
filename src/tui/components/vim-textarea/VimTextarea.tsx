@@ -19,6 +19,7 @@ export interface VimTextareaProps {
   onBufferChange?: (content: string) => void;
   onCursorChange?: (event: { line: number; visualColumn: number }) => void;
   onKeyDown?: (key: KeyEvent) => void;
+  onNormalModeKeyDown?: (key: KeyEvent) => void;
   width?: number | string;
   height?: number | string;
   flexGrow?: number;
@@ -41,6 +42,7 @@ export const VimTextarea: Component<VimTextareaProps> = (props) => {
       onBufferChange={props.onBufferChange}
       onCursorChange={props.onCursorChange}
       onKeyDown={props.onKeyDown}
+      onNormalModeKeyDown={props.onNormalModeKeyDown}
       width={props.width}
       height={props.height}
       flexGrow={props.flexGrow}

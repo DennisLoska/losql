@@ -23,6 +23,7 @@ export interface VimTextareaOptions extends TextareaOptions {
   onModeChange?: (mode: VimMode) => void;
   onBufferChange?: (content: string) => void;
   onKeyDown?: (key: KeyEvent) => void;
+  onNormalModeKeyDown?: (key: KeyEvent) => void;
 }
 
 export class VimTextareaRenderable extends TextareaRenderable {
@@ -30,6 +31,7 @@ export class VimTextareaRenderable extends TextareaRenderable {
   private _modeChangeListener?: (mode: VimMode) => void;
   private _bufferChangeListener?: (content: string) => void;
   private _keyDownListener?: (key: KeyEvent) => void;
+  private _normalModeKeyDownListener?: (key: KeyEvent) => void;
   private _pendingOperator: string | null = null; // For dd, yy, etc.
   private _yankRegister: YankRegister = { text: "", isLinewise: false };
   private _visualAnchor: VisualSelection | null = null;
@@ -58,6 +60,7 @@ export class VimTextareaRenderable extends TextareaRenderable {
     this._modeChangeListener = options.onModeChange;
     this._bufferChangeListener = options.onBufferChange;
     this._keyDownListener = options.onKeyDown;
+    this._normalModeKeyDownListener = options.onNormalModeKeyDown;
     this.updateCursorForMode();
   }
 
@@ -126,7 +129,6 @@ export class VimTextareaRenderable extends TextareaRenderable {
   }
 
   public override handleKeyPress(key: KeyEvent): boolean {
-    // Notify keydown listener
     if (this._keyDownListener) {
       this._keyDownListener(key);
     }
@@ -363,6 +365,14 @@ export class VimTextareaRenderable extends TextareaRenderable {
     if (key.meta || key.super) {
       this._pendingOperator = null;
       return false;
+    }
+
+    Bun.write(
+      "/tmp/losql-logs",
+      JSON.stringify({ listener: this._normalModeKeyDownListener }),
+    );
+    if (this._normalModeKeyDownListener) {
+      this._normalModeKeyDownListener(key);
     }
 
     // Undo: u
@@ -841,11 +851,23 @@ export class VimTextareaRenderable extends TextareaRenderable {
     return this._bufferChangeListener;
   }
 
-  public override set onKeyDown(handler: ((key: KeyEvent) => void) | undefined) {
+  public override set onKeyDown(
+    handler: ((key: KeyEvent) => void) | undefined,
+  ) {
     this._keyDownListener = handler;
   }
 
   public override get onKeyDown(): ((key: KeyEvent) => void) | undefined {
     return this._keyDownListener;
+  }
+
+  public set onNormalModeKeyDown(
+    handler: ((key: KeyEvent) => void) | undefined,
+  ) {
+    this._normalModeKeyDownListener = handler;
+  }
+
+  public get onNormalModeKeyDown(): ((key: KeyEvent) => void) | undefined {
+    return this._normalModeKeyDownListener;
   }
 }

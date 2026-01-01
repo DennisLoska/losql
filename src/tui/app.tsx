@@ -5,9 +5,9 @@ import { parseColor, SyntaxStyle, type KeyEvent } from "@opentui/core";
 import { fetch } from "bun";
 
 type SqlResponse = {
-  results?: Record<string, unknown>[];
-  report?: Record<string, unknown>[];
-  error?: string;
+  results?: Record<string, unknown>[] | null;
+  report?: Record<string, unknown>[] | null;
+  error?: string | null;
 };
 
 const tokyoNightStyle = SyntaxStyle.fromStyles({
@@ -28,12 +28,34 @@ const tokyoNightStyle = SyntaxStyle.fromStyles({
 const App = () => {
   const [query, setQuery] = createSignal("SELECT * FROM calls LIMIT 5;");
   const [result, setResult] = createSignal<SqlResponse | null>(null);
+  const [focus, setFocus] = createSignal("editor");
 
-  function handleKeyDown(key: KeyEvent) {
+  function handleEditor(key: KeyEvent) {
     // Ctrl+s to execute query
     if (key.ctrl && key.name === "s") {
       executeQuery();
-      return;
+    }
+
+    if (key.shift && key.name === "j") {
+      setFocus("results");
+    }
+    if (key.shift && key.name === "l") {
+      setFocus("report");
+    }
+  }
+
+  function handleResults(key: KeyEvent) {
+    if (key.shift && key.name === "k") {
+      setFocus("editor");
+    }
+    if (key.shift && key.name === "l") {
+      setFocus("report");
+    }
+  }
+
+  function handleReport(key: KeyEvent) {
+    if (key.shift && key.name === "h") {
+      setFocus("editor");
     }
   }
 
@@ -43,7 +65,13 @@ const App = () => {
       body: JSON.stringify({ query: query().trim() }),
     });
 
-    if (!res.ok) return;
+    if (!res.ok) {
+      setResult({
+        results: null,
+        report: null,
+        error: JSON.stringify({ message: res.statusText, code: res.status }),
+      });
+    }
     setResult((await res.json()) as SqlResponse);
   }
 
@@ -59,21 +87,25 @@ const App = () => {
       >
         <box
           border
-          borderColor="orange"
+          focusedBorderColor="orange"
+          borderColor={focus() === "editor" ? "orange" : "white"}
           minHeight="5%"
           maxHeight="35%"
           paddingLeft="1%"
         >
           <VimTextarea
-            focused
+            focused={focus() === "editor"}
             initialValue={query()}
             cursorColor="orange"
             onBufferChange={setQuery}
-            onKeyDown={handleKeyDown}
+            onNormalModeKeyDown={handleEditor}
             height="auto"
           />
         </box>
-        <box
+        <scrollbox
+          focused={focus() === "results"}
+          focusedBorderColor="orange"
+          onKeyDown={handleResults}
           border
           height="auto"
           maxHeight="95%"
@@ -96,10 +128,13 @@ const App = () => {
               width="100%"
             />
           </Show>
-        </box>
+        </scrollbox>
       </box>
 
-      <box
+      <scrollbox
+        focused={focus() === "report"}
+        onKeyDown={handleReport}
+        focusedBorderColor="orange"
         border
         width="30%"
         height="100%"
@@ -113,7 +148,7 @@ const App = () => {
             syntaxStyle={tokyoNightStyle}
           />
         </Show>
-      </box>
+      </scrollbox>
     </box>
   );
 };
