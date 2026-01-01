@@ -127,7 +127,7 @@ const App = () => {
           focusedBorderColor="orange"
           borderColor={focus() === "editor" ? "orange" : "white"}
           minHeight="5%"
-          maxHeight="35%"
+          maxHeight="40%"
           paddingLeft={1}
         >
           <VimTextarea
