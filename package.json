@@ -7,7 +7,8 @@
     "dev": "bun run --watch src/main.ts",
     "ui": "bun run --watch src/tui/app.tsx",
     "server": "bun run --watch src/server/app.ts",
-    "release": "bun build --compile ./src/server/app.ts --outfile losql"
+    "build": "bun run ./build.ts",
+    "release": "bun build --compile ./dist/main.js --outfile losql"
   },
   "devDependencies": {
     "@types/bun": "latest"
