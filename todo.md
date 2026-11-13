@@ -1,16 +1,8 @@
-# SQL Editor
+# Ideas
 
-- LSP integration
-- LLM integration
+Done in v0.2: the agent on Claude Code, Codex, OpenCode or Antigravity, SQLite and Postgres, themes with a transparent mode, the Table, JSON and Record result views, onboarding, `:q` from anywhere, `/` search.
 
-# SQL Analyzer
-
-- LLM integration to evaluate it instantly
-
-# Result table
-
-- Detailed popup view -> inline edits generate update queries 
-
-# Make it vim
-- `:q` anywhere exits Losql
-- `/` to enable search over the entire TUI
+- LSP integration for the editor
+- Inline edits in the Record view that generate `update` statements
+- Export a Result to a file
+- Run SQLite statements in a worker so they can be cancelled

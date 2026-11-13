@@ -25,6 +25,10 @@
     // Some stricter flags (disabled by default)
     "noUnusedLocals": false,
     "noUnusedParameters": false,
-    "noPropertyAccessFromIndexSignature": false
-  }
+    "noPropertyAccessFromIndexSignature": false,
+    "resolveJsonModule": true,
+    "types": ["bun"]
+  },
+  "include": ["src", "test", "build.ts"],
+  "exclude": ["node_modules", "dist", ".refs"]
 }

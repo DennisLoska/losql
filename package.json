@@ -1,26 +1,26 @@
 {
   "name": "losql",
-  "module": "src/index.tsx",
+  "version": "0.2.0",
+  "module": "src/main.ts",
   "type": "module",
   "private": true,
+  "bin": { "losql": "src/main.ts" },
   "scripts": {
-    "dev": "bun run --watch src/main.ts",
-    "ui": "bun run --watch src/tui/app.tsx",
-    "server": "bun run --watch src/server/app.ts",
-    "build": "bun run ./build.ts"
-  },
-  "devDependencies": {
-    "@types/bun": "latest"
-  },
-  "peerDependencies": {
-    "typescript": "^5"
+    "dev": "bun run src/main.ts",
+    "test": "bun test src test",
+    "typecheck": "tsc --noEmit",
+    "check": "bun run typecheck && bun run test",
+    "build": "bun run ./build.ts",
+    "verify:tui": "bun run build && scripts/verify-tui.sh"
   },
   "dependencies": {
-    "@babel/core": "^7.28.5",
-    "@babel/preset-typescript": "^7.28.5",
-    "@opentui/core": "^0.1.66",
-    "@opentui/solid": "^0.1.66",
-    "babel-preset-solid": "1.9.9",
-    "solid-js": "1.9.9"
+    "@opentui/core": "0.8.4",
+    "@opentui/solid": "0.8.4",
+    "postgres": "^4.1.1",
+    "solid-js": "1.9.17"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5"
   }
 }

@@ -1,0 +1,12 @@
+github-copilot/claude-haiku-4.5
+github-copilot/claude-haiku-5.5
+github-copilot/claude-opus-4.8
+github-copilot/claude-opus-4.8-fast
+github-copilot/claude-opus-5
+github-copilot/claude-opus-5.5
+github-copilot/claude-sonnet-5
+github-copilot/claude-sonnet-5.5
+github-copilot/gemini-3.8-flash
+github-copilot/gemini-4-argon
+github-copilot/gemini-4-carbon
+github-copilot/gpt-5.3-codex

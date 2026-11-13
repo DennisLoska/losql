@@ -1,0 +1,4 @@
+{"type":"system","subtype":"init","session_id":"1d4e9c11-c5dc-47c0-a879-57ad2da695b8","tools":[],"mcp_servers":[],"model":"claude-haiku-5-5","claude_code_version":"2.1.322","cwd":"/tmp/losql-agent"}
+{"type":"rate_limit_event","rate_limit_info":{"status":"allowed_warning"}}
+{"type":"assistant","message":{"model":"claude-haiku-5-5","role":"assistant","type":"message","content":[{"type":"text","text":"{\"action\":\"answer\",\"message\":\"ok\"}"}],"stop_reason":null},"session_id":"1d4e9c11-c5dc-47c0-a879-57ad2da695b8"}
+{"type":"result","subtype":"success","is_error":false,"result":"{\"action\":\"answer\",\"message\":\"ok\"}","session_id":"1d4e9c11-c5dc-47c0-a879-57ad2da695b8","stop_reason":"end_turn","terminal_reason":"completed","duration_ms":946,"num_turns":1}

@@ -1,0 +1,38 @@
+name: ci
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: losql
+          POSTGRES_PASSWORD: losql
+          # The tests build their own URLs and expect a server that asks for no password.
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U losql"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      LOSQL_TEST_PG_URL: postgres://losql@localhost:5432/postgres
+      LOSQL_NO_ANIMATIONS: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.9
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+      - run: bun run test
+      - run: bun run build
+      - run: ./losql --version
