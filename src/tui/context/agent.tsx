@@ -23,6 +23,7 @@ import {
   type StepRecord,
   type Turn,
   type TurnRequest,
+  type WorkspaceContext,
 } from "../../core/agent/loop";
 import { providerErrorText } from "../../core/agent/prompt";
 import { PROVIDERS } from "../../core/agent/providers";
@@ -335,6 +336,7 @@ export function AgentProvider(
     let reqText = "";
     let statement: string | undefined;
     let errorText: string | undefined;
+    let workspace: WorkspaceContext | undefined;
     let source: { bufferId: number; statement: string } | null = null;
 
     const editor = props.getApi()?.editor;
@@ -343,6 +345,64 @@ export function AgentProvider(
     if (request.intent === "ask") {
       turnText = (request.text ?? "").trim();
       reqText = turnText;
+
+      const ws: WorkspaceContext = {};
+      if (editor) {
+        const buffers = editor.buffers();
+        const activeIdx = editor.active();
+        const curBuf = buffers[activeIdx];
+        const liveSql = editor.text();
+        if (liveSql.trim().length > 0) {
+          const edMode = editor.mode();
+          const sel =
+            edMode === "visual" || edMode === "visual-line"
+              ? findEditorVisualSelection()
+              : null;
+          const stmt = editor.statement();
+          const cursorStatement =
+            stmt && stmt.text.trim().length > 0 && stmt.text.trim() !== liveSql.trim()
+              ? stmt.text
+              : undefined;
+          ws.activeBuffer = {
+            name: curBuf?.name ?? "scratch",
+            sql: liveSql,
+            ...(cursorStatement !== undefined ? { cursorStatement } : {}),
+            ...(sel && sel.trim().length > 0 ? { selection: sel } : {}),
+          };
+        }
+        const others = buffers.filter((_, idx) => idx !== activeIdx).map((b) => b.name);
+        if (others.length > 0) {
+          ws.otherBuffers = others;
+        }
+      }
+      const shown = session.shown();
+      if (shown && shown.ok) {
+        ws.lastResult = {
+          statement: shown.statement,
+          columns: shown.result.columns.map((c) => c.name),
+          rowCount: shown.result.rows.length,
+          truncated: shown.result.truncated,
+        };
+      }
+      const lastErr = session.lastError();
+      if (lastErr) {
+        ws.lastError = {
+          statement: lastErr.statement,
+          error: providerErrorText(
+            lastErr.error,
+            activeDriver.connection.dialect,
+            config.config().agent.dataAccess,
+          ),
+        };
+      }
+      if (
+        ws.activeBuffer !== undefined ||
+        ws.otherBuffers !== undefined ||
+        ws.lastResult !== undefined ||
+        ws.lastError !== undefined
+      ) {
+        workspace = ws;
+      }
     } else if (request.intent === "fix") {
       const lastErr = session.lastError();
       if (!lastErr) {
@@ -417,6 +477,7 @@ export function AgentProvider(
       reqText,
       statement,
       errorText,
+      workspace,
       source,
       controller,
       turnId,
@@ -435,6 +496,7 @@ export function AgentProvider(
       reqText,
       statement,
       errorText,
+      workspace,
       source,
       controller,
       turnId,
@@ -504,6 +566,7 @@ export function AgentProvider(
       ...(statement !== undefined ? { statement } : {}),
       ...(errorText !== undefined ? { error: errorText } : {}),
       ...(planText !== undefined ? { plan: planText } : {}),
+      ...(workspace !== undefined ? { workspace } : {}),
       conversation,
     };
 
@@ -531,6 +594,50 @@ export function AgentProvider(
           driver: activeDriver,
           config: agentCfg,
           signal: controller.signal,
+          readBuffer: (name) => {
+            if (!isStillValid()) return { buffers: [], error: "session closed" };
+            const ed = props.getApi()?.editor;
+            if (!ed) return { buffers: [], error: "editor unavailable" };
+            const bufs = ed.buffers();
+            const activeIdx = ed.active();
+            const getSql = (idx: number) => (idx === activeIdx ? ed.text() : bufs[idx]!.text);
+            if (name !== undefined) {
+              const idx = bufs.findIndex((b) => b.name === name);
+              if (idx === -1) {
+                return {
+                  buffers: bufs.map((b, i) => ({ name: b.name, active: i === activeIdx })),
+                  error: `no open buffer named "${name}"`,
+                };
+              }
+              return {
+                buffers: [{ name: bufs[idx]!.name, active: idx === activeIdx, sql: getSql(idx) }],
+              };
+            }
+            return {
+              buffers: bufs.map((b, i) => ({
+                name: b.name,
+                active: i === activeIdx,
+                sql: getSql(i),
+              })),
+            };
+          },
+          readResults: () => {
+            if (!isStillValid()) return null;
+            const cur = session.shown();
+            if (!cur) return null;
+            if (!cur.ok) {
+              return {
+                ok: false,
+                statement: cur.statement,
+                error: providerErrorText(
+                  cur.error,
+                  activeDriver.connection.dialect,
+                  config.config().agent.dataAccess,
+                ),
+              };
+            }
+            return { ok: true, statement: cur.statement, result: cur.result };
+          },
         },
         (event) => {
           if (!isStillValid()) return;

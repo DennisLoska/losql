@@ -5,7 +5,10 @@ const MAX_CANDIDATE_STARTS = 64;
 
 export type AgentAction =
   | { action: "query"; sql: string; why?: string }
+  | { action: "explain"; sql: string; why?: string }
   | { action: "describe"; relations: string[] }
+  | { action: "read_buffer"; name?: string }
+  | { action: "read_results" }
   | { action: "answer"; message: string; sql?: string };
 
 export type ParsedReply = { ok: true; action: AgentAction } | { ok: false; reason: string };
@@ -148,18 +151,22 @@ export function parseAction(reply: string): ParsedReply {
   const obj = found.obj;
   const actionType = obj.action as string;
 
-  if (actionType === "query") {
+  if (actionType === "query" || actionType === "explain") {
     if (typeof obj.sql !== "string" || obj.sql.trim().length === 0) {
-      return { ok: false, reason: boundReason('a "query" action needs a non-empty "sql" string') };
+      const article = actionType === "explain" ? "an" : "a";
+      return {
+        ok: false,
+        reason: boundReason(`${article} "${actionType}" action needs a non-empty "sql" string`),
+      };
     }
     if (containsNul(obj.sql)) {
       return { ok: false, reason: boundReason(NUL_REASON) };
     }
-    const action: AgentAction = { action: "query", sql: obj.sql };
-    if (typeof obj.why === "string" && obj.why.trim().length > 0) {
-      action.why = obj.why;
-    }
-    return { ok: true, action };
+    const why = typeof obj.why === "string" && obj.why.trim().length > 0 ? obj.why : undefined;
+    return {
+      ok: true,
+      action: { action: actionType, sql: obj.sql, ...(why !== undefined ? { why } : {}) },
+    };
   }
 
   if (actionType === "describe") {
@@ -173,6 +180,24 @@ export function parseAction(reply: string): ParsedReply {
       };
     }
     return { ok: true, action: { action: "describe", relations: [...obj.relations] } };
+  }
+
+  if (actionType === "read_buffer") {
+    if (obj.name !== undefined && typeof obj.name !== "string") {
+      return {
+        ok: false,
+        reason: boundReason('a "read_buffer" action needs a string "name" when given'),
+      };
+    }
+    const action: AgentAction = { action: "read_buffer" };
+    if (typeof obj.name === "string" && obj.name.trim().length > 0) {
+      action.name = obj.name.trim();
+    }
+    return { ok: true, action };
+  }
+
+  if (actionType === "read_results") {
+    return { ok: true, action: { action: "read_results" } };
   }
 
   if (actionType === "answer") {

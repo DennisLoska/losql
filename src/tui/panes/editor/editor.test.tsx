@@ -649,7 +649,7 @@ describe("Buffers", () => {
         await app.press("gt");
       }
       expect(app.api.editor.active()).toBe(0);
-      let topLine = app.frame().split("\n")[0]!;
+      let topLine = app.frame().split("\n")[1]!;
       expect(topLine).toContain(" 1 scratch ");
       expect(topLine).toContain("›");
       expect(topLine).not.toContain("‹");
@@ -659,7 +659,7 @@ describe("Buffers", () => {
         await app.press("gt");
       }
       expect(app.api.editor.active()).toBe(12);
-      topLine = app.frame().split("\n")[0]!;
+      topLine = app.frame().split("\n")[1]!;
       expect(topLine).toContain(" 13 very_long_buffer_na… ");
       expect(topLine).toContain("‹");
       expect(topLine).toContain("›");
@@ -669,7 +669,7 @@ describe("Buffers", () => {
         await app.press("gt");
       }
       expect(app.api.editor.active()).toBe(24);
-      topLine = app.frame().split("\n")[0]!;
+      topLine = app.frame().split("\n")[1]!;
       expect(topLine).toContain(" 25 buffer-25 ");
       expect(topLine).toContain("‹");
       expect(topLine).not.toContain("›");
@@ -830,8 +830,8 @@ describe("Buffers", () => {
 
         for (let paneWidth = 8; paneWidth <= 40; paneWidth++) {
           await app.resize(paneWidth + 2, 36);
-          const rawLine = app.frame().split("\n")[0] ?? "";
-          // Strip 1 cell left padding and 1 cell right padding of PaneFrame
+          const rawLine = app.frame().split("\n")[1] ?? "";
+          // Strip 1 cell left border and 1 cell right border of PaneFrame
           const innerLine = rawLine.slice(1, rawLine.length - 1).trimEnd();
           expect(Bun.stringWidth(innerLine)).toBeLessThanOrEqual(paneWidth);
 

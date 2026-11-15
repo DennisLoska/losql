@@ -71,9 +71,9 @@ describe("setup states", () => {
 });
 
 describe("a Turn", () => {
-  test("typing a question runs Steps and ends with a Proposal", async () => {
+  test("typing a question runs Steps and ends with a Proposal, rendering the user message as an OpenCode card", async () => {
     await start([countQuery, countAnswer]);
-    await app.press("<Space>ai");
+    await app.press("<Space>aa");
     expect(app.api.focus.pane()).toBe("agent");
     expect(app.api.status.current().mode).toBe("INSERT");
     await app.press("how many orders are there<CR>");
@@ -81,9 +81,16 @@ describe("a Turn", () => {
     expect(turn()).toMatchObject({ intent: "ask", text: "how many orders are there", status: "done", message: "There are 12 orders." });
     expect(turn().steps.length).toBe(1);
     expect(turn().proposal).toMatchObject({ sql: "select count(*) as orders from orders", kind: "read" });
-    for (const text of ["you", "how many orders are there", "agent", "▸ query", "→ 1 row", "There are 12 orders.", "select count(*) as orders", "enter accept"]) {
+    for (const text of ["┃  how many orders are there", "agent", "▸ query", "→ 1 row", "There are 12 orders.", "select count(*) as orders", "enter accept"]) {
       expect(app.frame()).toContain(text);
     }
+    expect(app.frame()).not.toContain("┃ you");
+    // User card uses backgroundElement fill and secondary left vertical bar
+    const userLine = app.spans().lines.find((l) => l.spans.map((s) => s.text).join("").includes("┃  how many orders are there"));
+    expect(userLine).toBeDefined();
+    const barSpan = userLine!.spans.find((s) => s.text.includes("┃"))!;
+    expect(barSpan.fg).toEqual(app.api.theme.color("secondary"));
+    expect(barSpan.bg).toEqual(app.api.theme.color("backgroundElement"));
     expect(fake.prompts.length).toBe(2);
     expect(fake.prompts[0]).toContain("how many orders are there");
     expect(fake.prompts[0]).toContain("orders(id integer pk");
@@ -156,7 +163,7 @@ describe("Proposals", () => {
     await start([countQuery, countAnswer]);
     await app.api.agent.ask({ intent: "ask", text: "how many orders" });
     app.api.focus.focus("agent");
-    await app.press("<CR>");
+    await app.press("<Esc><CR>");
     expect(app.api.focus.pane()).toBe("editor");
     expect(app.api.editor.buffers().map((b) => b.name)).toEqual(["scratch", "agent"]);
     expect(app.api.editor.text()).toBe("select count(*) as orders from orders");
@@ -171,7 +178,7 @@ describe("Proposals", () => {
     await start([countAnswer]);
     await app.api.agent.ask({ intent: "ask", text: "how many orders" });
     app.api.focus.focus("agent");
-    await app.press("r");
+    await app.press("<Esc>r");
     await app.waitFor(() => app.api.session.shown() !== null);
     expect(app.api.dialog.depth()).toBe(0);
     expect(app.api.editor.text()).toBe("select count(*) as orders from orders");
@@ -182,7 +189,7 @@ describe("Proposals", () => {
     await app.api.agent.ask({ intent: "ask", text: "wipe the orders" });
     expect(turn().proposal!.kind).toBe("write");
     app.api.focus.focus("agent");
-    await app.press("r");
+    await app.press("<Esc>r");
     expect(app.api.dialog.depth()).toBe(1);
     expect(app.frame()).toContain("Run this statement?");
     expect(app.frame()).toContain("delete from orders");
@@ -201,7 +208,7 @@ describe("Proposals", () => {
     await app.api.agent.ask({ intent: "ask", text: "two" });
     app.api.focus.focus("agent");
     expect(app.api.agent.selected()!.sql).toBe("select 2");
-    await app.press("{");
+    await app.press("<Esc>{");
     expect(app.api.agent.selected()!.sql).toBe("select count(*) as orders from orders");
     await app.press("{y");
     expect(app.deps.written).toEqual([osc52("select count(*) as orders from orders")]);
@@ -213,7 +220,7 @@ describe("Proposals", () => {
     await start(['{"action":"answer","message":"Just words."}']);
     await app.api.agent.ask({ intent: "ask", text: "hello" });
     app.api.focus.focus("agent");
-    await app.press("<CR>r");
+    await app.press("<Esc><CR>r");
     expect(app.api.editor.buffers().length).toBe(1);
     expect(app.api.focus.pane()).toBe("agent");
   });
@@ -243,7 +250,7 @@ describe("quick actions", () => {
     expect(fake.prompts[0]).toContain("select count(*) frm orders");
     expect(fake.prompts[0]).toContain("syntax error");
     app.api.focus.focus("agent");
-    await app.press("<CR>");
+    await app.press("<Esc><CR>");
     expect(app.api.editor.buffers().length).toBe(1);
     expect(app.api.editor.text()).toBe("select 1;\nselect count(*) from orders;");
     expect(app.api.focus.pane()).toBe("editor");
@@ -337,7 +344,7 @@ test("the transcript scrolls and follows new Turns", async () => {
   await app.settle();
   expect(app.frame()).toContain("line 59");
   expect(app.frame()).not.toMatch(/line 0 /);
-  await app.press("gg");
+  await app.press("<Esc>gg");
   expect(app.frame()).toMatch(/line 0 /);
   expect(app.frame()).not.toContain("line 59");
   await app.press("G");
@@ -366,7 +373,7 @@ describe("long Proposal SQL wrapping in the Agent Pane", () => {
     for (const rawLine of frame.split("\n")) {
       const idx = rawLine.lastIndexOf("┃ ");
       if (idx === -1) continue;
-      const cell = rawLine.slice(idx + 2).trimEnd();
+      const cell = rawLine.slice(idx + 2).replace(/│$/, "").trimEnd();
       if (cell.startsWith("↪ ")) {
         if (cardRows.length > 0) {
           cardRows[cardRows.length - 1] += ` ${cell.slice(2).trimStart()}`;
@@ -395,7 +402,7 @@ describe("long Proposal SQL wrapping in the Agent Pane", () => {
     expect(unwrapped140).toContain("DELETE FROM orders WHERE status = 'cancelled';");
 
     // Confirmation before running a write Proposal shows the whole Statement
-    await app.press("r");
+    await app.press("<Esc>r");
     expect(app.api.dialog.depth()).toBe(1);
     expect(app.frame()).toContain("Run this statement?");
     expect(app.frame()).toContain("'cancelled');");
@@ -778,7 +785,7 @@ describe("confirmation before running a Proposal that is not a read", () => {
     app.api.focus.focus("agent");
     await app.settle();
 
-    await app.press("r");
+    await app.press("<Esc>r");
     expect(app.api.dialog.depth()).toBe(1);
     const frame80 = app.frame();
     expect(frame80).toContain("Run this statement?");
@@ -826,7 +833,7 @@ describe("confirmation before running a Proposal that is not a read", () => {
     app.api.focus.focus("agent");
     await app.settle();
 
-    await app.press("r");
+    await app.press("<Esc>r");
     expect(app.api.dialog.depth()).toBe(1);
     const f = app.frame();
     expect(f).toContain("Run this statement?");
@@ -853,7 +860,7 @@ describe("confirmation before running a Proposal that is not a read", () => {
     app.api.focus.focus("agent");
     await app.settle();
 
-    await app.press("r");
+    await app.press("<Esc>r");
     expect(app.api.dialog.depth()).toBe(1);
     expect(app.frame()).toContain("200 statements, 200 change data or structure:");
     expect(app.frame()).toMatch(/… \d+ more rows · cancel, then open it in the editor/);
@@ -1033,7 +1040,7 @@ describe("clipboard copy failure reporting in the Agent Pane", () => {
     await app.api.agent.ask({ intent: "ask", text: "how many" });
     await finished();
     app.api.focus.focus("agent");
-    await app.press("y");
+    await app.press("<Esc>y");
     await app.waitFor(() => app.api.status.message() !== null);
     expect(app.api.status.message()).toEqual({
       text: "Could not copy: pbcopy failed: pbcopy unavailable",
@@ -1046,12 +1053,11 @@ describe("clipboard copy failure reporting in the Agent Pane", () => {
     await app.api.agent.ask({ intent: "ask", text: "how many" });
     await finished();
     app.api.focus.focus("agent");
-    await app.press("y");
+    await app.press("<Esc>y");
     expect(app.deps.written).toEqual([osc52("select count(*) as orders from orders")]);
     expect(app.api.status.message()).toBeNull();
   });
 });
-
 
 
 
@@ -1087,7 +1093,7 @@ test("a failed copy that finishes after the Agent Pane is gone changes nothing",
   await app.api.agent.ask({ intent: "ask", text: "how many" });
   await finished();
   app.api.focus.focus("agent");
-  await app.press("y");
+  await app.press("<Esc>y");
   expect(copies).toHaveLength(1);
   setShown(false);
   await app.settle();
@@ -1112,7 +1118,7 @@ function cardRows(frame: string): string[] {
   const rows: string[] = [];
   for (const line of frame.split("\n")) {
     const idx = line.lastIndexOf("┃ ");
-    if (idx !== -1) rows.push(line.slice(idx + 2).trimEnd());
+    if (idx !== -1) rows.push(line.slice(idx + 2).replace(/│$/, "").trimEnd());
   }
   return rows;
 }
@@ -1149,12 +1155,12 @@ describe("fix 1: a Proposal is shown, accepted and run as the database reads it"
       expect(rows[first]).toBe("delete from orders -- cleanup");
       expect(rows[first + 1]).toBe("where id = 1");
 
-      await app.press("<CR>");
+      await app.press("<Esc><CR>");
       expect(app.api.focus.pane()).toBe("editor");
       expect(app.api.editor.text().split("\n")).toEqual(["delete from orders -- cleanup", "where id = 1"]);
 
       app.api.focus.focus("agent");
-      await app.press("r");
+      await app.press("<Esc>r");
       expect(app.api.dialog.depth()).toBe(1);
       expect(app.frame()).toContain("where id = 1");
       await app.press("y");
@@ -1200,7 +1206,7 @@ describe("fix 2: a real SQL line starting with ↪ is not taken for a continuati
     }
     expect(continuedComment).toBe(true);
 
-    await app.press("<CR>");
+    await app.press("<Esc><CR>");
     expect(app.api.editor.text()).toBe(sql);
   });
 
@@ -1234,7 +1240,7 @@ describe("fix 4: the confirmation shows every character of a Statement it lists"
         await app.api.agent.ask({ intent: "ask", text: "delete" });
         app.api.focus.focus("agent");
         await app.settle();
-        await app.press("r");
+        await app.press("<Esc>r");
         expect(app.api.dialog.depth()).toBe(1);
         const body = dialogRows(app.frame(), w);
         expect(body.some((r) => r.includes("or true") || /… \d+ more rows/.test(r))).toBe(true);
@@ -1305,7 +1311,6 @@ describe("fix 5: only the Agent decides whether a request is accepted", () => {
     const optimizing = app.api.agent.ask({ intent: "optimize" });
     expect(optimizing.accepted).toBe(true);
     app.api.focus.focus("agent");
-    await app.press("i");
     await app.press("next question<CR>");
     expect(app.frame()).toContain("> next question");
     expect(app.api.status.message()?.text).toBe("The agent is still working");
@@ -1349,7 +1354,7 @@ describe("fix 6: the summary and the marker of the confirmation are readable", (
       await app.api.agent.ask({ intent: "ask", text: "delete" });
       app.api.focus.focus("agent");
       await app.settle();
-      await app.press("r");
+      await app.press("<Esc>r");
       expect(app.api.dialog.depth()).toBe(1);
       for (const dialogWidth of [30, 36, 42, 48, 54, 60]) {
         const w = dialogWidth + 4;
@@ -1403,7 +1408,7 @@ describe("final fix 1: the Conversation belongs to the Connection it was held on
     expect(app.frame()).not.toContain("wipe the orders");
 
     app.api.focus.focus("agent");
-    await app.press("r");
+    await app.press("<Esc>r");
     expect(app.api.dialog.depth()).toBe(0);
     await app.press("y");
     await app.settle();
@@ -1442,7 +1447,7 @@ describe("final fix 1: the Conversation belongs to the Connection it was held on
     expect(app.api.agent.selected()).toMatchObject({ sql: "select count(*) as orders from orders" });
 
     app.api.focus.focus("agent");
-    await app.press("r");
+    await app.press("<Esc>r");
     await app.waitFor(() => app.api.session.shown() !== null);
     const shown = app.api.session.shown()!;
     expect(shown.ok && shown.result.rows).toEqual([[12]]);
@@ -1480,7 +1485,7 @@ describe("final fix 1: the Conversation belongs to the Connection it was held on
 
     app.api.session.show(null);
     app.api.focus.focus("agent");
-    await app.press("r");
+    await app.press("<Esc>r");
     await app.waitFor(() => app.api.session.shown() !== null);
     const shown = app.api.session.shown()!;
     expect(shown.ok && shown.statement).toBe("select 1 as x");
@@ -1553,7 +1558,7 @@ describe("final fix 1: the Conversation belongs to the Connection it was held on
     await start([deleteAnswer], { seed: withOrders });
     await app.api.agent.ask({ intent: "ask", text: "wipe the orders" });
     app.api.focus.focus("agent");
-    await app.press("r");
+    await app.press("<Esc>r");
     expect(app.api.dialog.depth()).toBe(1);
 
     expect(await app.api.session.connect(otherPath())).toEqual({ ok: true });
@@ -1734,3 +1739,75 @@ describe("Provider processes do not inherit the variables a saved Connection rea
     }
   });
 });
+
+describe("automatic Editor context and workspace tools", () => {
+  test("asking a question automatically sends the SQL in the Editor Buffer, cursor Statement, open Buffer names, and Results summary without copy-pasting", async () => {
+    await start([
+      '{"action":"read_buffer","name":"customers_report"}',
+      '{"action":"read_results"}',
+      '{"action":"explain","sql":"select o.id, c.email from orders o join customers c on c.id = o.customer_id where o.status = \'paid\'"}',
+      '{"action":"answer","message":"Joined customer email and filtered to paid orders.","sql":"select o.id, c.email from orders o join customers c on c.id = o.customer_id where o.status = \'paid\'"}',
+    ]);
+    app.api.focus.setVisible("agent", true);
+    app.api.editor.openBuffer({ name: "customers_report", text: "select id, email from customers;" });
+    app.api.editor.openBuffer({ name: "orders_draft", text: "select 1;\nselect * from orders where customer_id = 1;" });
+    await app.api.session.run({ statements: ["select count(*) as total_orders from orders"] });
+    app.api.focus.focus("editor");
+    await app.settle();
+    await app.press("j"); // move cursor onto second statement in orders_draft
+
+    // Switch to Agent Pane via vim motion L -> auto-enters INSERT mode -> ask without pasting SQL!
+    await app.press("L");
+    expect(app.api.focus.pane()).toBe("agent");
+    expect(app.api.status.current().mode).toBe("INSERT");
+    await app.press("filter this to paid and join email from customers_report<CR>");
+    await finished();
+
+    // First prompt automatically carried active Buffer SQL, cursor Statement, other open Buffers, and last Result summary
+    const p0 = fake.prompts[0]!;
+    expect(p0).toContain("Active editor buffer (orders_draft):");
+    expect(p0).toContain("select * from orders where customer_id = 1");
+    expect(p0).toContain("Statement under cursor:");
+    expect(p0).toContain("customers_report");
+    expect(p0).toContain("Last result (1 row, columns: total_orders):");
+
+    // Agent executed read_buffer, read_results, and explain Steps and rendered them in the Transcript
+    expect(turn().steps.length).toBe(3);
+    expect(turn().message).toBe("Joined customer email and filtered to paid orders.");
+    const f = app.frame();
+    expect(f).toContain("▸ buffer  customers_report");
+    expect(f).toContain("▸ results  1 row");
+    expect(f).toContain("▸ explain");
+    expect(f).toContain("Joined customer email and filtered to");
+    expect(f).toContain("paid orders.");
+  });
+
+  test("in schema mode workspace context sends Editor SQL and Result column names/rowCount, but never leaks Result row values or refuses read_results/explain cleanly", async () => {
+    await start(
+      [
+        '{"action":"read_results"}',
+        '{"action":"explain","sql":"select * from customers"}',
+        '{"action":"answer","message":"Schema-only answer.","sql":"select id from customers"}',
+      ],
+      { config: { agent: { provider: "claude", dataAccess: "schema" } } },
+    );
+    app.api.editor.setText("select email from customers");
+    await app.api.session.run({ statements: ["select email from customers"] });
+    const shown = app.api.session.shown()!;
+    expect(shown.ok).toBe(true);
+    const firstEmail = String(shown.ok && shown.result.rows[0]![0]);
+    expect(firstEmail).toContain("@");
+
+    await app.api.agent.ask({ intent: "ask", text: "improve my query" });
+    await finished();
+
+    for (const p of fake.prompts) {
+      expect(p).not.toContain(firstEmail);
+    }
+    expect(fake.prompts[0]).toContain("select email from customers");
+    expect(fake.prompts[0]).toContain("columns: email");
+    expect(fake.prompts[1]).toContain('agent.dataAccess is \\"schema\\"');
+    expect(fake.prompts[2]).toContain('agent.dataAccess is \\"schema\\"');
+  });
+});
+

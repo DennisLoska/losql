@@ -9,6 +9,11 @@ import { type ResultsApi, ResultsPane } from "./panes/results/ResultsPane";
 import { type SchemaApi, SchemaPane } from "./panes/schema/SchemaPane";
 import { Statusline } from "./ui/statusline";
 
+export function agentTargetWidth(terminalWidth: number, overlay: boolean): number {
+  if (overlay) return Math.min(terminalWidth, 45);
+  return Math.min(terminalWidth, Math.max(46, Math.round(terminalWidth * 0.3)));
+}
+
 export function Workspace(props: {
   exposeSchema?: (api: SchemaApi) => void;
   exposeEditor?: (api: EditorApi) => void;
@@ -21,23 +26,26 @@ export function Workspace(props: {
 
   let editorApi: EditorApi | undefined;
 
+  const schemaOverlay = createMemo(() => focus.layout().schema === "overlay");
+  const agentOverlay = createMemo(() => focus.layout().agent === "overlay");
+
   const schemaTween = createTween(() => (focus.visible("schema") ? 32 : 0), {
     duration: 180,
     clock: deps.clock,
     enabled: () => config.animations(),
   });
 
-  const agentTween = createTween(() => (focus.visible("agent") ? 44 : 0), {
-    duration: 180,
-    clock: deps.clock,
-    enabled: () => config.animations(),
-  });
+  const agentTween = createTween(
+    () => (focus.visible("agent") ? agentTargetWidth(focus.size().width, agentOverlay()) : 0),
+    {
+      duration: 180,
+      clock: deps.clock,
+      enabled: () => config.animations(),
+    },
+  );
 
   const schemaCols = createMemo(() => Math.round(schemaTween()));
   const agentCols = createMemo(() => Math.round(agentTween()));
-
-  const schemaOverlay = createMemo(() => focus.layout().schema === "overlay");
-  const agentOverlay = createMemo(() => focus.layout().agent === "overlay");
 
   return (
     <box flexGrow={1} width="100%" height="100%" flexDirection="column">

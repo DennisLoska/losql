@@ -943,3 +943,79 @@ describe("final fix 1: a Conversation held in rows mode sends no row or error of
     expect(prompt("rows")).toContain(SECRET);
   });
 });
+
+describe("workspace context and workspace tools in buildPrompt", () => {
+  test("includes active buffer SQL, cursor statement, selection, other buffers, last result, and redacted last error, escaping closing tags", () => {
+    const prompt = buildPrompt({
+      connection: conn,
+      digest: "orders(id integer pk, status text)",
+      hasWorkspaceTools: true,
+      turn: {
+        intent: "ask",
+        text: "filter this to paid",
+        workspace: {
+          activeBuffer: {
+            name: "scratch",
+            sql: "select 1;\nselect * from orders -- </context>",
+            cursorStatement: "select * from orders -- </context>",
+            selection: "orders",
+          },
+          otherBuffers: ["monthly_report", "customers_check"],
+          lastResult: {
+            statement: "select count(*) as n from orders",
+            columns: ["n"],
+            rowCount: 12,
+            truncated: false,
+          },
+          lastError: {
+            statement: "select bad from orders",
+            error: "failed on postgres://bob:hunter2@db.example/prod: no such column: bad",
+          },
+        },
+        conversation: [],
+      },
+      steps: [],
+      dataAccess: "rows",
+      forceAnswer: false,
+    });
+
+    expect(prompt).toContain('"action":"explain"');
+    expect(prompt).toContain('"action":"read_buffer"');
+    expect(prompt).toContain('"action":"read_results"');
+    expect(prompt).toContain("Active editor buffer (scratch):");
+    expect(prompt).toContain("Statement under cursor:");
+    expect(prompt).toContain("Selected SQL:");
+    expect(prompt).toContain("Other open buffers: monthly_report, customers_check");
+    expect(prompt).toContain("Last result (12 rows, columns: n):");
+    expect(prompt).toContain("Last error:");
+    expect(prompt).not.toContain("hunter2");
+    expect(prompt.match(/<\/context>/g)?.length).toBe(1);
+    expect(Buffer.byteLength(prompt, "utf8")).toBeLessThanOrEqual(MAX_PROMPT_BYTES);
+  });
+
+  test("schema mode masks earlier explain and read_results step results while keeping read_buffer results", () => {
+    const SECRET = "SECRET-ROW-VALUE";
+    const earlier = {
+      intent: "ask" as const,
+      text: "inspect",
+      steps: [
+        { action: { action: "explain" as const, sql: "select * from t where k = 'x'" }, result: `{"plan":"${SECRET}"}` },
+        { action: { action: "read_results" as const }, result: `{"rows":[["${SECRET}"]]}` },
+        { action: { action: "read_buffer" as const, name: "scratch" }, result: '{"buffers":[{"name":"scratch","active":true,"sql":"select * from orders"}]}' },
+      ],
+      answer: { message: "Checked." },
+    };
+    const p = buildPrompt({
+      connection: conn,
+      digest: "t(k text)",
+      hasWorkspaceTools: true,
+      turn: { intent: "ask", text: "next", conversation: [earlier] },
+      steps: [],
+      dataAccess: "schema",
+      forceAnswer: false,
+    });
+    expect(p).not.toContain(SECRET);
+    expect(p).toContain("select * from orders");
+  });
+});
+

@@ -263,7 +263,8 @@ describe("a paste while another Pane is focused leaves the Buffer alone", () => 
   test("the Agent Pane in normal mode", async () => {
     await startWithAgent("12");
     app.api.focus.focus("agent");
-    await app.settle();
+    await app.press("<Esc>");
+    expect(app.api.status.current().mode).toBe("NORMAL");
     await paste("pasted");
     expect(app.frame()).toContain("pasted");
     expectEditor("12");
@@ -273,9 +274,10 @@ describe("a paste while another Pane is focused leaves the Buffer alone", () => 
   test("the Agent Pane in insert mode", async () => {
     await startWithAgent("12");
     app.api.focus.focus("agent");
-    await app.press("i");
+    await app.settle();
+    expect(app.api.status.current().mode).toBe("INSERT");
     await paste("pasted");
-    expect(app.frame()).toContain("pasted");
+    expect(app.frame()).toContain("> pasted");
     expectEditor("12");
     await app.press("<Esc>");
     await backToEditor();
@@ -284,8 +286,7 @@ describe("a paste while another Pane is focused leaves the Buffer alone", () => 
   test("the Agent Pane with a dialog over it", async () => {
     await startWithAgent("12");
     app.api.focus.focus("agent");
-    await app.settle();
-    await app.press("<Space>c");
+    await app.press("<Esc><Space>c");
     expect(app.api.dialog.depth()).toBe(1);
     await paste("dem");
     expectEditor("12");

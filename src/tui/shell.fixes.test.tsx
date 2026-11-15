@@ -6,24 +6,87 @@ afterEach(async () => {
   await app?.dispose();
 });
 
-describe("fix 1: split borders", () => {
-  test("only the Schema and Agent Panes draw a split border", async () => {
-    app = await mount();
+describe("pane borders, focus highlight, and ~30% Agent Pane width", () => {
+  function cellFgAt(spans: ReturnType<TestApp["spans"]>, row: number, col: number): [number, number, number, number] {
+    const line = spans.lines[row]!;
+    let x = 0;
+    for (const span of line.spans) {
+      if (col >= x && col < x + span.width) {
+        return span.fg.toInts() as [number, number, number, number];
+      }
+      x += span.width;
+    }
+    throw new Error(`column ${col} out of bounds on row ${row}`);
+  }
+
+  test("every visible Pane draws a 4-sided border and Agent Pane is ~30% width", async () => {
+    app = await mount({ width: 160, height: 36 });
     app.api.focus.setVisible("agent", true);
     await app.settle();
 
     const lines = app.frame().split("\n");
-    // In a 120x36 terminal with schema (32 cols) and agent (44 cols) on the sides:
-    // Schema occupies columns 0..31, so its right edge is column 31 ("┃").
-    // Editor and Results occupy columns 32..75, so their first column is column 32.
-    // Agent occupies columns 76..119, so its left edge is column 76 ("┃").
-    // Check across all workspace rows (rows 0..34; row 35 is the statusline).
-    for (let row = 0; row < 35; row++) {
-      const line = lines[row]!;
-      expect(line[31]).toBe("┃"); // Schema right border
-      expect(line[32]).not.toBe("┃"); // Editor / Results first column has no border
-      expect(line[76]).toBe("┃"); // Agent left border
-    }
+    // At width 160: Schema = 32 (cols 0..31), Agent = 30% = 48 (cols 112..159), Centre = cols 32..111.
+    expect(lines[0]![0]).toBe("╭");
+    expect(lines[0]![31]).toBe("╮");
+    expect(lines[0]![32]).toBe("╭");
+    expect(lines[0]![111]).toBe("╮");
+    expect(lines[0]![112]).toBe("╭");
+    expect(lines[0]![159]).toBe("╮");
+
+    // Bottom workspace row (row 34; row 35 is the statusline):
+    expect(lines[34]![0]).toBe("╰");
+    expect(lines[34]![31]).toBe("╯");
+    expect(lines[34]![32]).toBe("╰");
+    expect(lines[34]![111]).toBe("╯");
+    expect(lines[34]![112]).toBe("╰");
+    expect(lines[34]![159]).toBe("╯");
+
+    // Resize to 200 wide: Agent Pane scales to 30% = 60 columns (cols 140..199).
+    await app.resize(200, 36);
+    const wideLines = app.frame().split("\n");
+    expect(wideLines[0]![140]).toBe("╭");
+    expect(wideLines[0]![199]).toBe("╮");
+  });
+
+  test("switching Panes with H/J/K/L highlights the entered Pane border with a subtle orange", async () => {
+    app = await mount({ width: 160, height: 36 });
+    app.api.focus.setVisible("agent", true);
+    await app.waitFor(() => app.api.session.status() === "connected");
+    app.api.focus.focus("editor");
+    await app.settle();
+
+    const isSubtleOrange = ([r, g, b]: [number, number, number, number]) =>
+      r > g + 20 && g > b + 15 && r < 210;
+
+    // Initially Editor (top-left at row 0, col 32) is focused; Schema (col 0), Results (row 34, col 32), Agent (col 112) are not.
+    let s = app.spans();
+    const editorFocusedColor = cellFgAt(s, 0, 32);
+    const schemaUnfocusedColor = cellFgAt(s, 0, 0);
+    expect(isSubtleOrange(editorFocusedColor)).toBe(true);
+    expect(editorFocusedColor).not.toEqual(schemaUnfocusedColor);
+    expect(cellFgAt(s, 34, 32)).toEqual(schemaUnfocusedColor);
+    expect(cellFgAt(s, 0, 112)).toEqual(schemaUnfocusedColor);
+
+    // Move left with H -> Schema Pane border becomes subtle orange; Editor reverts to unfocused border.
+    await app.press("H");
+    expect(app.api.focus.pane()).toBe("schema");
+    s = app.spans();
+    expect(cellFgAt(s, 0, 0)).toEqual(editorFocusedColor);
+    expect(cellFgAt(s, 0, 32)).toEqual(schemaUnfocusedColor);
+
+    // Move right with L -> Editor, then down with J -> Results Pane border becomes subtle orange.
+    await app.press("LJ");
+    expect(app.api.focus.pane()).toBe("results");
+    s = app.spans();
+    expect(cellFgAt(s, 34, 32)).toEqual(editorFocusedColor);
+    expect(cellFgAt(s, 0, 32)).toEqual(schemaUnfocusedColor);
+
+    // Move right with L -> Agent Pane border becomes subtle orange.
+    await app.press("L");
+    expect(app.api.focus.pane()).toBe("agent");
+    s = app.spans();
+    expect(cellFgAt(s, 0, 112)).toEqual(editorFocusedColor);
+    expect(cellFgAt(s, 34, 32)).toEqual(schemaUnfocusedColor);
   });
 });
 

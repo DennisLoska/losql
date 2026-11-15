@@ -133,8 +133,10 @@ describe("completion", () => {
     await app.press("A<C-n>");
     expect(labels()![0]).toBe("customers");
     const lines = app.frame().split("\n");
-    const editorLine = lines[1]!;
-    const popupLine = lines[2]!;
+    const editorRow = lines.findIndex((l) => l.includes("select * from cu"));
+    expect(editorRow).toBeGreaterThanOrEqual(0);
+    const editorLine = lines[editorRow]!;
+    const popupLine = lines[editorRow + 1]!;
     const wordStartCell = Bun.stringWidth(editorLine.slice(0, editorLine.indexOf("cu")));
     const labelCell = Bun.stringWidth(popupLine.slice(0, popupLine.lastIndexOf("customers")));
     // CompletionPopup has 1 leading space padding before the label, so the box starts under "cu"
