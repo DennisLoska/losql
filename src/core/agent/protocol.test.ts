@@ -150,3 +150,45 @@ test("SQL with a NUL is an invalid reply: a NUL outside the SQL is kept as befor
     action: { action: "answer", message: `a${NUL}b\n\`\`\`sql\nselect 1\n\`\`\``, sql: "select 1" },
   });
 });
+
+test("explain, read_buffer and read_results actions parse and validate inputs", () => {
+  expect(parseAction('{"action":"explain","sql":"select * from orders","why":"check plan"}')).toEqual({
+    ok: true,
+    action: { action: "explain", sql: "select * from orders", why: "check plan" },
+  });
+  expect(parseAction('{"action":"explain","sql":"select 1"}')).toEqual({
+    ok: true,
+    action: { action: "explain", sql: "select 1" },
+  });
+  expect(parseAction('{"action":"explain"}')).toEqual({
+    ok: false,
+    reason: 'an "explain" action needs a non-empty "sql" string',
+  });
+  expect(parseAction(JSON.stringify({ action: "explain", sql: `select 1${NUL}` }))).toEqual({
+    ok: false,
+    reason: nulReason,
+  });
+
+  expect(parseAction('{"action":"read_buffer"}')).toEqual({
+    ok: true,
+    action: { action: "read_buffer" },
+  });
+  expect(parseAction('{"action":"read_buffer","name":"  analytics  "}')).toEqual({
+    ok: true,
+    action: { action: "read_buffer", name: "analytics" },
+  });
+  expect(parseAction('{"action":"read_buffer","name":"   "}')).toEqual({
+    ok: true,
+    action: { action: "read_buffer" },
+  });
+  expect(parseAction('{"action":"read_buffer","name":42}')).toEqual({
+    ok: false,
+    reason: 'a "read_buffer" action needs a string "name" when given',
+  });
+
+  expect(parseAction('{"action":"read_results"}')).toEqual({
+    ok: true,
+    action: { action: "read_results" },
+  });
+});
+

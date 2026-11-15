@@ -106,7 +106,7 @@ describe("the Record view draws a bounded part of a one-line value", () => {
       expect(app.api.results.view()).toBe("record");
       expect(longestText(app.setup.renderer.root)).toBeLessThanOrEqual(4 * 100);
       const row = app.frame().split("\n").find((line) => line.includes("big"))!;
-      expect(row.trimEnd().endsWith("…")).toBe(true);
+      expect(row.replace(/[│\s]+$/, "").endsWith("…")).toBe(true);
       const t1 = performance.now();
       await app.press("j");
       const jMs = performance.now() - t1;

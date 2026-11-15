@@ -21,6 +21,7 @@ export interface FocusApi {
   toggle(pane: PaneId): void;
   move(direction: "h" | "j" | "k" | "l" | "w"): void;
   layout(): { schema: "side" | "overlay"; agent: "side" | "overlay" };
+  size(): { width: number; height: number };
   /** The Results Pane is shown full screen (not saved). */
   zoomed(): boolean;
   /** Zooms the Results Pane, or restores the layout and focus from before. */
@@ -186,6 +187,7 @@ export function FocusProvider(props: ParentProps<{ expose?: (api: FocusApi) => v
     toggle,
     move,
     layout,
+    size: dimensions,
     zoomed,
     toggleZoom,
     leaveZoom,

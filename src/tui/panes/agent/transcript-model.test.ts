@@ -46,6 +46,17 @@ describe("stepSummary", () => {
   test("describe", () => {
     expect(stepSummary({ action: { action: "describe", relations: ["orders", "customers"] }, result: "..." }, 80)).toBe("▸ describe  orders, customers");
   });
+
+  test("explain, read_buffer and read_results", () => {
+    expect(stepSummary({ action: { action: "explain", sql: "select * from orders" }, result: '{"columns":["detail"],"rows":[["SCAN orders"]],"truncated":false}' }, 80))
+      .toBe("▸ explain  select * from orders  → plan");
+    expect(stepSummary({ action: { action: "read_buffer", name: "report" }, result: '{"buffers":[]}' }, 80))
+      .toBe("▸ buffer  report");
+    expect(stepSummary({ action: { action: "read_buffer" }, result: '{"buffers":[]}' }, 80))
+      .toBe("▸ buffer  open buffers");
+    expect(stepSummary({ action: { action: "read_results" }, result: '{"statement":"select 1","columns":["1"],"rows":[[1],[2]],"truncated":false}' }, 80))
+      .toBe("▸ results  2 rows");
+  });
 });
 
 test("errorAdvice tells the user what to do", () => {
@@ -64,15 +75,16 @@ describe("transcriptLines", () => {
     message: null, errorKind: null, proposal: null, source: null, ...extra,
   });
 
-  test("a finished Turn with a Step and a Proposal", () => {
+  test("a finished Turn renders the user message as a padded OpenCode card without 'you' label, followed by agent label, Step and Proposal", () => {
     const lines = transcriptLines([turn({
       steps: [{ action: { action: "query", sql: "select count(*) from orders" }, result: '{"columns":["n"],"rows":[[12]],"truncated":false}' }],
       message: "There are 12 orders.",
       proposal: { id: 7, turnId: 1, sql: "select count(*)\nfrom orders", kind: "read" },
     })], 60, claude);
     expect(lines).toEqual([
-      { kind: "label", who: "you", turnId: 1 },
-      { kind: "text", text: "how many orders?", tone: "normal", turnId: 1 },
+      { kind: "user", text: "", pad: true, turnId: 1 },
+      { kind: "user", text: "how many orders?", turnId: 1 },
+      { kind: "user", text: "", pad: true, turnId: 1 },
       { kind: "blank" },
       { kind: "label", who: "agent", turnId: 1 },
       { kind: "step", text: "▸ query  select count(*) from orders  → 1 row", turnId: 1 },
@@ -91,8 +103,10 @@ describe("transcriptLines", () => {
 
   test("a failed Turn shows the error and the advice", () => {
     const lines = transcriptLines([turn({ status: "error", errorKind: "quota", message: "You've hit your usage limit" })], 60, claude);
+    expect(lines.filter((l) => l.kind === "user" && !l.pad).map((l) => l.kind === "user" && l.text)).toEqual([
+      "how many orders?",
+    ]);
     expect(lines.filter((l) => l.kind === "text").map((l) => l.kind === "text" && [l.tone, l.text])).toEqual([
-      ["normal", "how many orders?"],
       ["error", "You've hit your usage limit"],
       ["muted", "Claude Code has reached its usage limit. Try again later or"],
       ["muted", "switch provider with space p."],
@@ -106,9 +120,12 @@ describe("transcriptLines", () => {
     expect(fenced).toContainEqual({ kind: "sql", text: "select 1", turnId: 1, proposalId: null });
   });
 
-  test("long text is wrapped to the width", () => {
-    const lines = transcriptLines([turn({ text: "word ".repeat(30).trim() })], 20, claude);
-    for (const line of lines) if (line.kind === "text") expect(line.text.length).toBeLessThanOrEqual(20);
+  test("long text is wrapped inside the user card padding and to the width for agent text", () => {
+    const lines = transcriptLines([turn({ text: "word ".repeat(30).trim(), message: "word ".repeat(30).trim() })], 20, claude);
+    for (const line of lines) {
+      if (line.kind === "user" && !line.pad) expect(line.text.length).toBeLessThanOrEqual(17);
+      if (line.kind === "text") expect(line.text.length).toBeLessThanOrEqual(20);
+    }
   });
 
   const deleteCancelledSql = [

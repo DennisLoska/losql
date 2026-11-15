@@ -1,5 +1,6 @@
 import { TextAttributes } from "@opentui/core";
 import {
+  createComputed,
   createMemo,
   createSignal,
   For,
@@ -24,6 +25,7 @@ import { cellWidth } from "../../ui/cells";
 import { InputLine } from "../../ui/input-line";
 import { createLineInput } from "../../ui/line-input";
 import { printable } from "../../ui/printable";
+import { agentTargetWidth } from "../../workspace";
 import { PaneFrame } from "../frame";
 import { Transcript, type TranscriptHandle } from "./Transcript";
 import { wrapText } from "./transcript-model";
@@ -48,6 +50,32 @@ export function AgentPane(): JSX.Element {
   const isSetupState = createMemo(() => {
     const prov = agent.provider();
     return prov === null || !prov.installed;
+  });
+
+  let wasFocused = false;
+  let wasSetup = true;
+  createComputed(() => {
+    const focused = focus.pane() === "agent";
+    const setup = isSetupState();
+    if (focused && !wasFocused) {
+      if (!setup) {
+        setMode("insert");
+      }
+      setPendingG(false);
+    } else if (focused && wasSetup && !setup) {
+      setMode("insert");
+      setPendingG(false);
+    } else if (!focused && wasFocused) {
+      setMode("normal");
+      setPendingG(false);
+    }
+    wasFocused = focused;
+    wasSetup = setup;
+  });
+
+  const setupWrapWidth = createMemo(() => {
+    const overlay = focus.layout().agent === "overlay";
+    return Math.max(20, agentTargetWidth(focus.size().width, overlay) - 4);
   });
 
   const providerMeta = createMemo(() => {
@@ -317,7 +345,7 @@ export function AgentPane(): JSX.Element {
               <For
                 each={wrapText(
                   "Press Enter to choose one of the coding CLIs installed on this machine.",
-                  41,
+                  setupWrapWidth(),
                 )}
               >
                 {(line) => <text fg={theme.color("textMuted")}>{line}</text>}
@@ -331,7 +359,7 @@ export function AgentPane(): JSX.Element {
               <For
                 each={wrapText(
                   `${printable(agent.provider()!.label)} is not installed.`,
-                  41,
+                  setupWrapWidth(),
                 )}
               >
                 {(line) => <text fg={theme.color("text")}>{line}</text>}
@@ -340,17 +368,18 @@ export function AgentPane(): JSX.Element {
             <box flexDirection="column">
               <For
                 each={(() => {
+                  const w = setupWrapWidth();
                   const hint = printable(agent.provider()!.installHint);
-                  if (cellWidth(hint) <= 41) return [hint];
+                  if (cellWidth(hint) <= w) return [hint];
                   const colonIdx = hint.indexOf(": ");
                   if (colonIdx > 0) {
                     const head = hint.slice(0, colonIdx + 1);
                     const tail = hint.slice(colonIdx + 2);
-                    if (cellWidth(tail) <= 41) {
-                      return [...wrapText(head, 41), tail];
+                    if (cellWidth(tail) <= w) {
+                      return [...wrapText(head, w), tail];
                     }
                   }
-                  return wrapText(hint, 41);
+                  return wrapText(hint, w);
                 })()}
               >
                 {(line) => <text fg={theme.color("textMuted")}>{line}</text>}

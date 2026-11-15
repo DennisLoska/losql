@@ -1,6 +1,6 @@
 import type { Config } from "../config";
 import { redactConnectionText } from "../db/redact";
-import type { Cell, Driver, SchemaSnapshot } from "../db/types";
+import type { Cell, Driver, Result, SchemaSnapshot } from "../db/types";
 import { splitStatements } from "../sql/statements";
 import { describeRelations, schemaDigest } from "./digest";
 import {
@@ -9,6 +9,7 @@ import {
   MAX_AGENT_COLUMNS,
   MAX_AGENT_ERROR,
   MAX_AGENT_ROWS,
+  MAX_AGENT_SQL_CHARS,
   SYSTEM_PROMPT,
   buildPrompt,
 } from "./prompt";
@@ -29,12 +30,33 @@ export interface Turn {
   answer: { message: string; sql?: string } | null;
 }
 
+export interface WorkspaceContext {
+  activeBuffer?: {
+    name: string;
+    sql: string;
+    cursorStatement?: string;
+    selection?: string;
+  };
+  otherBuffers?: string[];
+  lastResult?: {
+    statement: string;
+    columns: string[];
+    rowCount: number;
+    truncated: boolean;
+  };
+  lastError?: {
+    statement: string;
+    error: string;
+  };
+}
+
 export interface TurnRequest {
   intent: Intent;
   text: string;
   statement?: string;
   error?: string;
   plan?: string;
+  workspace?: WorkspaceContext;
   conversation: Turn[];
 }
 
@@ -49,14 +71,25 @@ export type TurnOutcome =
   | { ok: true; message: string; sql?: string; steps: StepRecord[] }
   | { ok: false; kind: ProviderErrorKind | "protocol"; message: string; steps: StepRecord[] };
 
+export type ShownResultsSnapshot =
+  | { ok: true; statement: string; result: Result }
+  | { ok: false; statement: string; error: string }
+  | null;
+
 export interface AgentDeps {
   ask: (prompt: string, system: string, onText?: (text: string) => void) => Promise<string>;
   driver: Pick<Driver, "run" | "schema" | "connection">;
   config: Config["agent"];
   signal?: AbortSignal;
+  readBuffer?: (
+    name?: string,
+  ) => { buffers: { name: string; active: boolean; sql?: string }[]; error?: string };
+  readResults?: () => ShownResultsSnapshot;
 }
 
 const MAX_COLUMN_NAME_CHARS = 64;
+const MAX_BUFFER_NAME_CHARS = 128;
+const MAX_BUFFER_LIST = 20;
 
 /**
  * Turns every line break a reader could see but the database does not (CRLF, a lone CR,
@@ -99,14 +132,40 @@ function truncateCell(cell: Cell): null | boolean | number | string {
   return cutAtCodePoint(text, MAX_AGENT_CELL);
 }
 
+function formatBoundedResultPayload(res: Result, statement?: string): string {
+  const totalCols = res.columns.length;
+  const keptCols = res.columns.slice(0, MAX_AGENT_COLUMNS);
+  const columns = keptCols.map((c) => truncateColumnName(c.name));
+  const limitedRows = res.rows.slice(0, MAX_AGENT_ROWS);
+  const rows = limitedRows.map((row) => row.slice(0, MAX_AGENT_COLUMNS).map(truncateCell));
+  const payload: {
+    statement?: string;
+    columns: string[];
+    rows: (null | boolean | number | string)[][];
+    truncated: boolean;
+    columnsOmitted?: number;
+  } = {
+    ...(statement !== undefined ? { statement: cutAtCodePoint(statement, MAX_AGENT_SQL_CHARS) } : {}),
+    columns,
+    rows,
+    truncated: res.truncated || res.rows.length > MAX_AGENT_ROWS,
+  };
+  if (totalCols > MAX_AGENT_COLUMNS) {
+    payload.columnsOmitted = totalCols - MAX_AGENT_COLUMNS;
+  }
+  return JSON.stringify(payload);
+}
+
+const SCHEMA_ONLY_ERROR_JSON = JSON.stringify({
+  error: 'running queries is turned off (agent.dataAccess is "schema"); answer from the schema',
+});
+
 async function executeQueryStep(
   sql: string,
   deps: AgentDeps,
 ): Promise<string> {
   if (deps.config.dataAccess === "schema") {
-    return JSON.stringify({
-      error: 'running queries is turned off (agent.dataAccess is "schema"); answer from the schema',
-    });
+    return SCHEMA_ONLY_ERROR_JSON;
   }
 
   const statements = splitStatements(sql);
@@ -121,28 +180,97 @@ async function executeQueryStep(
       timeoutMs: AGENT_QUERY_TIMEOUT_MS,
       signal: deps.signal,
     });
-    const totalCols = res.columns.length;
-    const keptCols = res.columns.slice(0, MAX_AGENT_COLUMNS);
-    const columns = keptCols.map((c) => truncateColumnName(c.name));
-    const rows = res.rows.map((row) => row.slice(0, MAX_AGENT_COLUMNS).map(truncateCell));
-    const payload: {
-      columns: string[];
-      rows: (null | boolean | number | string)[][];
-      truncated: boolean;
-      columnsOmitted?: number;
-    } = {
-      columns,
-      rows,
-      truncated: res.truncated,
-    };
-    if (totalCols > MAX_AGENT_COLUMNS) {
-      payload.columnsOmitted = totalCols - MAX_AGENT_COLUMNS;
-    }
-    return JSON.stringify(payload);
+    return formatBoundedResultPayload(res);
   } catch (err) {
     const rawMessage = err instanceof Error ? err.message : String(err);
     return JSON.stringify({ error: sanitizeAgentError(rawMessage) });
   }
+}
+
+async function executeExplainStep(
+  sql: string,
+  deps: AgentDeps,
+): Promise<string> {
+  if (deps.config.dataAccess === "schema") {
+    return SCHEMA_ONLY_ERROR_JSON;
+  }
+
+  const statements = splitStatements(sql);
+  if (statements.length !== 1) {
+    return JSON.stringify({ error: "send exactly one statement per explain" });
+  }
+
+  // Strip any caller-supplied EXPLAIN prefix (including ANALYZE options) so EXPLAIN never executes writes or ANALYZE.
+  const body = statements[0]!.text
+    .replace(
+      /^\s*explain(?:\s*\([^)]*\)|\s+analyze|\s+verbose|\s+costs|\s+settings|\s+buffers|\s+wal|\s+timing|\s+summary|\s+format\s+\w+|\s+query\s+plan)*\s+/i,
+      "",
+    )
+    .trim();
+  if (body.length === 0) {
+    return JSON.stringify({ error: "send a SQL statement to explain" });
+  }
+
+  const explainSql =
+    deps.driver.connection.dialect === "postgres"
+      ? `explain ${body}`
+      : `explain query plan ${body}`;
+
+  try {
+    const res = await deps.driver.run(explainSql, {
+      readOnly: true,
+      maxRows: MAX_AGENT_ROWS,
+      timeoutMs: AGENT_QUERY_TIMEOUT_MS,
+      signal: deps.signal,
+    });
+    return formatBoundedResultPayload(res);
+  } catch (err) {
+    const rawMessage = err instanceof Error ? err.message : String(err);
+    return JSON.stringify({ error: sanitizeAgentError(rawMessage) });
+  }
+}
+
+function executeReadBufferStep(name: string | undefined, deps: AgentDeps): string {
+  if (!deps.readBuffer) {
+    return JSON.stringify({ error: "editor buffers are not available in this session" });
+  }
+  const snapshot = deps.readBuffer(name);
+  if (snapshot.error !== undefined) {
+    return JSON.stringify({
+      error: cutAtCodePoint(snapshot.error, MAX_AGENT_ERROR),
+      buffers: snapshot.buffers.slice(0, MAX_BUFFER_LIST).map((b) => ({
+        name: cutAtCodePoint(b.name, MAX_BUFFER_NAME_CHARS),
+        active: b.active,
+      })),
+    });
+  }
+  return JSON.stringify({
+    buffers: snapshot.buffers.slice(0, MAX_BUFFER_LIST).map((b) => ({
+      name: cutAtCodePoint(b.name, MAX_BUFFER_NAME_CHARS),
+      active: b.active,
+      ...(b.sql !== undefined ? { sql: cutAtCodePoint(b.sql, MAX_AGENT_SQL_CHARS) } : {}),
+    })),
+  });
+}
+
+function executeReadResultsStep(deps: AgentDeps): string {
+  if (deps.config.dataAccess === "schema") {
+    return SCHEMA_ONLY_ERROR_JSON;
+  }
+  if (!deps.readResults) {
+    return JSON.stringify({ error: "results pane is not available in this session" });
+  }
+  const shown = deps.readResults();
+  if (shown === null) {
+    return JSON.stringify({ shown: null });
+  }
+  if (!shown.ok) {
+    return JSON.stringify({
+      statement: cutAtCodePoint(shown.statement, MAX_AGENT_SQL_CHARS),
+      error: sanitizeAgentError(shown.error),
+    });
+  }
+  return formatBoundedResultPayload(shown.result, shown.statement);
 }
 
 export async function runAgent(
@@ -153,6 +281,7 @@ export async function runAgent(
   const steps: StepRecord[] = [];
   let corrected = false;
   let correction: string | undefined;
+  const hasWorkspaceTools = Boolean(deps.readBuffer || deps.readResults);
 
   const emit = (event: AgentEvent) => {
     try {
@@ -196,6 +325,7 @@ export async function runAgent(
       dataAccess: deps.config.dataAccess,
       forceAnswer,
       correction,
+      hasWorkspaceTools,
     });
 
     let reply: string;
@@ -224,7 +354,7 @@ export async function runAgent(
     corrected = false;
     correction = undefined;
     const { action } = parsed;
-    if (action.action === "query") {
+    if (action.action === "query" || action.action === "explain") {
       action.sql = normalizeLineBreaks(action.sql);
     } else if (action.action === "answer" && action.sql !== undefined) {
       action.sql = normalizeLineBreaks(action.sql);
@@ -251,6 +381,12 @@ export async function runAgent(
     let result: string;
     if (action.action === "query") {
       result = await executeQueryStep(action.sql, deps);
+    } else if (action.action === "explain") {
+      result = await executeExplainStep(action.sql, deps);
+    } else if (action.action === "read_buffer") {
+      result = executeReadBufferStep(action.name, deps);
+    } else if (action.action === "read_results") {
+      result = executeReadResultsStep(deps);
     } else {
       result = describeRelations(schema, action.relations);
     }

@@ -275,6 +275,30 @@ export function Transcript(props: {
               <Match when={line.kind === "blank"}>
                 <box height={1} width="100%" flexShrink={0} />
               </Match>
+              <Match when={line.kind === "user"}>
+                {(() => {
+                  const usr = line as Extract<TranscriptLine, { kind: "user" }>;
+                  return (
+                    <box
+                      height={1}
+                      width="100%"
+                      flexShrink={0}
+                      flexDirection="row"
+                      backgroundColor={theme.color("backgroundElement")}
+                      overflow="hidden"
+                    >
+                      <text fg={theme.color("secondary")} flexShrink={0}>
+                        {"┃"}
+                      </text>
+                      {usr.pad ? null : (
+                        <text fg={theme.color("text")} wrapMode="none" flexShrink={0}>
+                          {`  ${printable(usr.text)}`}
+                        </text>
+                      )}
+                    </box>
+                  );
+                })()}
+              </Match>
               <Match when={line.kind === "label"}>
                 {(() => {
                   const lbl = line as Extract<TranscriptLine, { kind: "label" }>;
@@ -284,11 +308,7 @@ export function Transcript(props: {
                         {"┃ "}
                       </text>
                       <text
-                        fg={
-                          lbl.who === "you"
-                            ? theme.color("secondary")
-                            : theme.color("primary")
-                        }
+                        fg={theme.color("primary")}
                         attributes={TextAttributes.BOLD}
                         flexShrink={0}
                       >

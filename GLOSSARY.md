@@ -74,7 +74,7 @@ One user request to the Agent together with every Step taken to answer it.
 _Avoid_: request, prompt, message
 
 **Step**:
-One action the Agent takes during a Turn: a read-only query, a describe, or the final answer.
+One action the Agent takes during a Turn: a read-only query, an explain, a describe, reading an open Buffer or shown Result, or the final answer.
 _Avoid_: tool call, iteration
 
 **Proposal**:

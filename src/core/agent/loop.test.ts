@@ -801,3 +801,96 @@ describe("SQL with a NUL character (U+0000) in a reply is an invalid reply", () 
     expect(plainOutcome).toEqual({ ok: true, message: `one${NUL}two`, steps: [] });
   }, 5000);
 });
+
+describe("workspace tools and explain step in runAgent", () => {
+  test("explain runs EXPLAIN QUERY PLAN read-only, read_buffer reads open buffers, and read_results reads shown results", async () => {
+    const { ask, prompts } = scripted([
+      '{"action":"read_buffer","name":"report"}',
+      '{"action":"read_results"}',
+      '{"action":"explain","sql":"select * from orders where customer_id = 1","why":"check index"}',
+      '{"action":"answer","message":"Uses index or scan.","sql":"select * from orders where customer_id = 1 and status = \'paid\'"}',
+    ]);
+    const outcome = await runAgent(
+      { intent: "ask", text: "check my report buffer and current results", conversation: [] },
+      {
+        ask,
+        driver,
+        config,
+        readBuffer: (name) => ({
+          buffers: [{ name: name ?? "scratch", active: false, sql: "select * from orders where customer_id = 1" }],
+        }),
+        readResults: () => ({
+          ok: true,
+          statement: "select count(*) as total from orders",
+          result: {
+            columns: [{ name: "total", type: "integer" }],
+            rows: [[12]],
+            truncated: false,
+            affected: null,
+            command: "SELECT",
+            durationMs: 1,
+          },
+        }),
+      },
+      () => {},
+    );
+    expect(outcome.ok).toBe(true);
+    expect(outcome.steps.length).toBe(3);
+    expect(JSON.parse(outcome.steps[0]!.result)).toEqual({
+      buffers: [{ name: "report", active: false, sql: "select * from orders where customer_id = 1" }],
+    });
+    expect(JSON.parse(outcome.steps[1]!.result)).toEqual({
+      statement: "select count(*) as total from orders",
+      columns: ["total"],
+      rows: [[12]],
+      truncated: false,
+    });
+    const planStep = JSON.parse(outcome.steps[2]!.result);
+    expect(Array.isArray(planStep.rows)).toBe(true);
+    expect(JSON.stringify(planStep.rows)).toContain("orders");
+    expect(prompts[0]).toContain('"action":"read_buffer"');
+    expect(prompts[0]).toContain('"action":"read_results"');
+  });
+
+  test("in schema mode explain and read_results are refused without touching driver.run or readResults, while read_buffer still works", async () => {
+    let ran = 0;
+    let resultsRead = 0;
+    const guarded = {
+      connection: driver.connection,
+      schema: () => driver.schema(),
+      run: (...a: Parameters<Driver["run"]>) => {
+        ran++;
+        return driver.run(...a);
+      },
+    };
+    const { ask } = scripted([
+      '{"action":"explain","sql":"select * from orders"}',
+      '{"action":"read_results"}',
+      '{"action":"read_buffer"}',
+      '{"action":"answer","message":"from schema and buffer"}',
+    ]);
+    const outcome = await runAgent(
+      { intent: "ask", text: "check", conversation: [] },
+      {
+        ask,
+        driver: guarded,
+        config: { ...config, dataAccess: "schema" },
+        readBuffer: () => ({ buffers: [{ name: "scratch", active: true, sql: "select * from orders" }] }),
+        readResults: () => {
+          resultsRead++;
+          return null;
+        },
+      },
+      () => {},
+    );
+    expect(outcome.ok).toBe(true);
+    expect(ran).toBe(0);
+    expect(resultsRead).toBe(0);
+    expect(JSON.parse(outcome.steps[0]!.result).error).toContain('agent.dataAccess is "schema"');
+    expect(JSON.parse(outcome.steps[1]!.result).error).toContain('agent.dataAccess is "schema"');
+    expect(JSON.parse(outcome.steps[2]!.result)).toEqual({
+      buffers: [{ name: "scratch", active: true, sql: "select * from orders" }],
+    });
+  });
+});
+

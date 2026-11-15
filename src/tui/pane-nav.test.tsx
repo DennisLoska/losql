@@ -206,31 +206,39 @@ describe("the Agent Pane", () => {
     await app.waitFor(() => app.api.agent.providers().length === 4);
   }
 
-  test("in insert mode H is typed into the input; after Esc, H moves to the centre", async () => {
+  test("entering the Agent Pane via Space a a, L, or ctrl+w l automatically focuses the chat input in INSERT mode", async () => {
     await startAgent();
-    await app.press("<Space>ai");
+    await app.press("<Space>aa");
     expect(pane()).toBe("agent");
     expect(app.api.status.current().mode).toBe("INSERT");
+
+    // Typing immediately enters text into the chat input; Esc leaves insert mode so H moves back to editor
     await app.press("HJKL");
     expect(pane()).toBe("agent");
     expect(app.frame()).toContain("> HJKL");
-    await app.press("<Esc>H");
+    await app.press("<Esc>");
+    expect(app.api.status.current().mode).toBe("NORMAL");
+    await app.press("H");
     expect(pane()).toBe("editor");
+
+    // Re-entering with vim motion L also focuses the chat input in INSERT mode
+    await app.press("L");
+    expect(pane()).toBe("agent");
+    expect(app.api.status.current().mode).toBe("INSERT");
+    await app.press("<Esc><C-h>");
+    expect(pane()).toBe("editor");
+
+    // Re-entering with ctrl+w l also focuses the chat input in INSERT mode
+    await app.press("<C-w>l");
+    expect(pane()).toBe("agent");
+    expect(app.api.status.current().mode).toBe("INSERT");
   });
 
-  test("ctrl+h moves the focus left when the input is not in insert mode", async () => {
+  test("after Esc, g in normal mode keeps the next key in the Agent Pane, not as a move", async () => {
     await startAgent();
-    await app.press("<Space>aa");
+    await app.press("<Space>aa<Esc>");
     expect(pane()).toBe("agent");
     expect(app.api.status.current().mode).toBe("NORMAL");
-    await app.press("<C-h>");
-    expect(pane()).toBe("editor");
-  });
-
-  test("after g the next key goes to the Agent Pane, not to a move", async () => {
-    await startAgent();
-    await app.press("<Space>aa");
-    expect(pane()).toBe("agent");
     await app.press("g");
     expect(app.api.status.current().pending).toBe("g");
     await app.press("H");

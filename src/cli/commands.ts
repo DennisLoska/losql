@@ -591,6 +591,8 @@ export async function runAsk(
           const { action } = event.step;
           if (action.action === "query") {
             writeStderr(deps, `losql: query ${escapeControl(action.sql).replace(/\s+/g, " ").trim()}\n`);
+          } else if (action.action === "explain") {
+            writeStderr(deps, `losql: explain ${escapeControl(action.sql).replace(/\s+/g, " ").trim()}\n`);
           } else if (action.action === "describe") {
             writeStderr(deps, `losql: describe ${escapeControl(action.relations.join(", "))}\n`);
           }

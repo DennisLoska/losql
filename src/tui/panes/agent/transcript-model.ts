@@ -6,7 +6,8 @@ import { segmentGraphemes } from "../../ui/line-input";
 import { printable } from "../../ui/printable";
 
 export type TranscriptLine =
-  | { kind: "label"; who: "you" | "agent"; turnId: number }
+  | { kind: "user"; text: string; pad?: true; turnId: number }
+  | { kind: "label"; who: "agent"; turnId: number }
   | { kind: "text"; text: string; tone: "normal" | "muted" | "error"; turnId: number }
   | { kind: "step"; text: string; turnId: number }
   | {
@@ -190,6 +191,63 @@ export function stepSummary(step: StepRecord, width: number): string {
     }
     return cutToCells(full, maxWidth);
   }
+  if (step.action.action === "explain") {
+    const oneLineSql = printable(step.action.sql).replace(/\s+/g, " ").trim();
+    let outcome = "plan";
+    try {
+      const parsed: unknown = JSON.parse(step.result);
+      if (typeof parsed === "object" && parsed !== null) {
+        const obj = parsed as Record<string, unknown>;
+        if (typeof obj.error === "string") {
+          const cleanErr = printable(obj.error).replace(/\s+/g, " ").trim();
+          outcome = `error: ${cleanErr}`;
+        }
+      }
+    } catch {
+      outcome = `error: ${printable(step.result).replace(/\s+/g, " ").trim()}`;
+    }
+
+    const prefix = "▸ explain  ";
+    const suffix = `  → ${outcome}`;
+    const full = `${prefix}${oneLineSql}${suffix}`;
+    if (cellWidth(full) <= maxWidth) {
+      return full;
+    }
+
+    const prefixW = cellWidth(prefix);
+    const suffixW = cellWidth(suffix);
+    const sqlBudget = maxWidth - prefixW - suffixW;
+    if (sqlBudget >= 1) {
+      return `${prefix}${cutToCells(oneLineSql, sqlBudget)}${suffix}`;
+    }
+    return cutToCells(full, maxWidth);
+  }
+  if (step.action.action === "read_buffer") {
+    const target = step.action.name ? printable(step.action.name) : "open buffers";
+    return cutToCells(`▸ buffer  ${target}`, maxWidth);
+  }
+  if (step.action.action === "read_results") {
+    let outcome = "empty";
+    try {
+      const parsed: unknown = JSON.parse(step.result);
+      if (typeof parsed === "object" && parsed !== null) {
+        const obj = parsed as Record<string, unknown>;
+        if (typeof obj.error === "string") {
+          const cleanErr = printable(obj.error).replace(/\s+/g, " ").trim();
+          outcome = `error: ${cleanErr}`;
+        } else if (obj.shown === null) {
+          outcome = "empty";
+        } else if (Array.isArray(obj.rows)) {
+          const n = obj.rows.length;
+          const truncated = obj.truncated === true;
+          outcome = truncated ? `${n}+ rows` : n === 1 ? "1 row" : `${n} rows`;
+        }
+      }
+    } catch {
+      outcome = `error: ${printable(step.result).replace(/\s+/g, " ").trim()}`;
+    }
+    return cutToCells(`▸ results  ${outcome}`, maxWidth);
+  }
   return "";
 }
 
@@ -365,10 +423,12 @@ export function turnTranscriptLines(
   provider: { label: string; binary: string; installHint: string } | null,
 ): TranscriptLine[] {
   const out: TranscriptLine[] = [];
-  out.push({ kind: "label", who: "you", turnId: turn.id });
-  for (const line of wrapText(turn.text, width)) {
-    out.push({ kind: "text", text: line, tone: "normal", turnId: turn.id });
+  const userWidth = Math.max(1, width - 3);
+  out.push({ kind: "user", text: "", pad: true, turnId: turn.id });
+  for (const line of wrapText(turn.text, userWidth)) {
+    out.push({ kind: "user", text: line, turnId: turn.id });
   }
+  out.push({ kind: "user", text: "", pad: true, turnId: turn.id });
   out.push({ kind: "blank" });
   out.push({ kind: "label", who: "agent", turnId: turn.id });
 
