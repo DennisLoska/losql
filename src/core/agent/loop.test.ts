@@ -892,5 +892,79 @@ describe("workspace tools and explain step in runAgent", () => {
       buffers: [{ name: "scratch", active: true, sql: "select * from orders" }],
     });
   });
+
+  test("explain strips comment-separated EXPLAIN/ANALYZE/ANALYSE prefixes and parenthesized options, and rejects bare ANALYZE", async () => {
+    const executedSql: string[] = [];
+    const pgDriver: Driver = {
+      connection: { id: "pg", name: "pg", dialect: "postgres", url: "postgres://localhost/db", display: "pg" },
+      schema: () => driver.schema(),
+      run: async (sqlText) => {
+        executedSql.push(sqlText);
+        return {
+          columns: [{ name: "QUERY PLAN", type: "text" }],
+          rows: [["Result  (cost=0.00..0.01 rows=1 width=4)"]],
+          truncated: false,
+          affected: null,
+          command: "EXPLAIN",
+          durationMs: 1,
+        };
+      },
+      close: async () => {},
+    };
+    const { ask } = scripted([
+      '{"action":"explain","sql":"EXPLAIN /*comment*/ ANALYZE SELECT pg_sleep(5)"}',
+      '{"action":"explain","sql":"EXPLAIN -- note\\n ANALYSE /*c*/ VERBOSE SELECT 1"}',
+      '{"action":"explain","sql":"EXPLAIN (/* ) */ ANALYZE, BUFFERS true) SELECT 2"}',
+      '{"action":"explain","sql":"ANALYZE SELECT pg_sleep(5)"}',
+      '{"action":"explain","sql":"ANALYSE orders"}',
+      '{"action":"explain","sql":"EXPLAIN (ANALYZE"}',
+      '{"action":"answer","message":"checked plans"}',
+    ]);
+    const outcome = await runAgent(
+      { intent: "ask", text: "check plans", conversation: [] },
+      { ask, driver: pgDriver, config },
+      () => {},
+    );
+    expect(outcome.ok).toBe(true);
+    expect(executedSql).toEqual([
+      "explain (analyze false) SELECT pg_sleep(5)",
+      "explain (analyze false) SELECT 1",
+      "explain (analyze false) SELECT 2",
+    ]);
+    expect(JSON.parse(outcome.steps[3]!.result).error).toContain("ANALYZE");
+    expect(JSON.parse(outcome.steps[4]!.result).error).toContain("ANALYZE");
+    expect(JSON.parse(outcome.steps[5]!.result).error).toContain("statement to explain");
+  });
+
+  const pgUrl = process.env.LOSQL_TEST_PG_URL;
+  test.skipIf(!pgUrl)("on Postgres explain never executes pg_sleep behind comment-separated ANALYZE or ANALYSE", async () => {
+    const { openPostgres } = await import("../db/postgres");
+    const pg = await openPostgres({ id: "pg", name: "pg", dialect: "postgres", url: pgUrl!, display: "pg" });
+    try {
+      const started = Date.now();
+      const { ask } = scripted([
+        '{"action":"explain","sql":"EXPLAIN /*comment*/ ANALYZE SELECT pg_sleep(5)"}',
+        '{"action":"explain","sql":"EXPLAIN ANALYSE SELECT pg_sleep(5)"}',
+        '{"action":"explain","sql":"EXPLAIN (/* ) */ ANALYZE true) SELECT pg_sleep(5)"}',
+        '{"action":"answer","message":"planned without sleeping"}',
+      ]);
+      const outcome = await runAgent(
+        { intent: "ask", text: "plan sleep", conversation: [] },
+        { ask, driver: pg, config },
+        () => {},
+      );
+      const elapsed = Date.now() - started;
+      expect(outcome.ok).toBe(true);
+      expect(elapsed).toBeLessThan(2000);
+      for (const step of outcome.steps) {
+        const parsed = JSON.parse(step.result);
+        expect(parsed.error).toBeUndefined();
+        expect(JSON.stringify(parsed.rows)).toContain("Result");
+      }
+    } finally {
+      await pg.close();
+    }
+  });
 });
+
 

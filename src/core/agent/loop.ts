@@ -1,6 +1,7 @@
 import type { Config } from "../config";
 import { redactConnectionText } from "../db/redact";
 import type { Cell, Driver, Result, SchemaSnapshot } from "../db/types";
+import { type Token, tokenize } from "../sql/lexer";
 import { splitStatements } from "../sql/statements";
 import { describeRelations, schemaDigest } from "./digest";
 import {
@@ -187,6 +188,117 @@ async function executeQueryStep(
   }
 }
 
+const EXPLAIN_LEGACY_OPTIONS = new Set([
+  "analyze",
+  "analyse",
+  "verbose",
+  "query",
+  "plan",
+  "costs",
+  "settings",
+  "buffers",
+  "wal",
+  "timing",
+  "summary",
+  "memory",
+  "serialize",
+  "generic_plan",
+]);
+
+const EXPLAIN_FORMAT_VALUES = new Set(["text", "xml", "json", "yaml"]);
+
+function isWordLikeToken(tok: Token): boolean {
+  return (
+    tok.kind === "keyword" ||
+    tok.kind === "identifier" ||
+    tok.kind === "function" ||
+    tok.kind === "type"
+  );
+}
+
+function stripExplainPrefix(
+  statement: string,
+): { ok: true; body: string } | { ok: false; error: string } {
+  const sig = tokenize(statement).filter((t) => t.kind !== "whitespace" && t.kind !== "comment");
+  let i = 0;
+
+  while (i < sig.length) {
+    const tok0 = sig[i]!;
+    if (!isWordLikeToken(tok0) || statement.slice(tok0.start, tok0.end).toLowerCase() !== "explain") {
+      break;
+    }
+    i++;
+
+    const next = sig[i];
+    if (next && next.kind === "punctuation" && statement.slice(next.start, next.end) === "(") {
+      let depth = 1;
+      i++;
+      while (i < sig.length && depth > 0) {
+        const inner = sig[i]!;
+        if (inner.kind === "punctuation") {
+          const p = statement.slice(inner.start, inner.end);
+          if (p === "(") depth++;
+          else if (p === ")") depth--;
+        }
+        i++;
+      }
+      if (depth !== 0) {
+        return { ok: false, error: "send a SQL statement to explain" };
+      }
+      continue;
+    }
+
+    while (i < sig.length) {
+      const optTok = sig[i]!;
+      if (!isWordLikeToken(optTok)) break;
+      const opt = statement.slice(optTok.start, optTok.end).toLowerCase();
+      if (opt === "format") {
+        i++;
+        const fmtTok = sig[i];
+        if (
+          fmtTok &&
+          isWordLikeToken(fmtTok) &&
+          EXPLAIN_FORMAT_VALUES.has(statement.slice(fmtTok.start, fmtTok.end).toLowerCase())
+        ) {
+          i++;
+        }
+        continue;
+      }
+      if (!EXPLAIN_LEGACY_OPTIONS.has(opt)) break;
+      i++;
+      if (opt !== "query" && opt !== "plan" && i < sig.length) {
+        const valTok = sig[i]!;
+        const valText = statement.slice(valTok.start, valTok.end).toLowerCase();
+        if (
+          (isWordLikeToken(valTok) &&
+            (valText === "true" || valText === "false" || valText === "on" || valText === "off")) ||
+          (valTok.kind === "number" && (valText === "0" || valText === "1"))
+        ) {
+          i++;
+        }
+      }
+    }
+  }
+
+  if (i >= sig.length) {
+    return { ok: false, error: "send a SQL statement to explain" };
+  }
+
+  const firstTok = sig[i]!;
+  const firstWord = isWordLikeToken(firstTok)
+    ? statement.slice(firstTok.start, firstTok.end).toLowerCase()
+    : "";
+  if (firstWord === "analyze" || firstWord === "analyse") {
+    return { ok: false, error: "explain does not run ANALYZE; send the query itself" };
+  }
+
+  const body = statement.slice(firstTok.start).trim();
+  if (body.length === 0) {
+    return { ok: false, error: "send a SQL statement to explain" };
+  }
+  return { ok: true, body };
+}
+
 async function executeExplainStep(
   sql: string,
   deps: AgentDeps,
@@ -200,21 +312,16 @@ async function executeExplainStep(
     return JSON.stringify({ error: "send exactly one statement per explain" });
   }
 
-  // Strip any caller-supplied EXPLAIN prefix (including ANALYZE options) so EXPLAIN never executes writes or ANALYZE.
-  const body = statements[0]!.text
-    .replace(
-      /^\s*explain(?:\s*\([^)]*\)|\s+analyze|\s+verbose|\s+costs|\s+settings|\s+buffers|\s+wal|\s+timing|\s+summary|\s+format\s+\w+|\s+query\s+plan)*\s+/i,
-      "",
-    )
-    .trim();
-  if (body.length === 0) {
-    return JSON.stringify({ error: "send a SQL statement to explain" });
+  // Strip any caller-supplied EXPLAIN prefix/options at the SQL token level and force non-ANALYZE planning.
+  const stripped = stripExplainPrefix(statements[0]!.text);
+  if (!stripped.ok) {
+    return JSON.stringify({ error: stripped.error });
   }
 
   const explainSql =
     deps.driver.connection.dialect === "postgres"
-      ? `explain ${body}`
-      : `explain query plan ${body}`;
+      ? `explain (analyze false) ${stripped.body}`
+      : `explain query plan ${stripped.body}`;
 
   try {
     const res = await deps.driver.run(explainSql, {
