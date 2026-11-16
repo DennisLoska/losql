@@ -88,6 +88,7 @@ writeFileSync(
     "- Three instant Result views (`Table`, `JSON`, `Record`) plus full-screen zoom (`space z`).",
     "- First-class Omarchy live `colors.toml` theme synchronization, `:set transparent` / `ctrl+t` transparent pane mode, and 7 built-in OpenCode-format themes.",
     "- Scriptable headless CLI: `losql exec`, `losql ask`, and `losql providers --test`.",
+    "- Install prebuilt binary (Linux & macOS): `curl -fsSL https://raw.githubusercontent.com/DennisLoska/losql/v0.2.0/install.sh | sh`.",
     "",
   ].join("\n"),
 );

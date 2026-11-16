@@ -64,6 +64,7 @@ export const ARCHIVE_FILES = ["LICENSE", "NOTICE", "README.md"] as const;
 const SEMVER_RE = /^\d+\.\d+\.\d+$/;
 const README_BADGE_RE = /(https:\/\/img\.shields\.io\/badge\/version-)(\d+\.\d+\.\d+)(-9ece6a\?style=flat-square"\s+alt="version\s+)(\d+\.\d+\.\d+)(")/;
 const LANDING_JSONLD_RE = /("softwareVersion"\s*:\s*")(\d+\.\d+\.\d+)(")/;
+const LANDING_INSTALL_URL_RE = /(https:\/\/raw\.githubusercontent\.com\/DennisLoska\/losql\/v)(\d+\.\d+\.\d+)(\/install\.sh\s*\|\s*sh)/;
 const LANDING_FOOTER_RE = /(Omarchy First · v)(\d+\.\d+\.\d+)(<\/p>)/;
 
 export interface VersionSources {
@@ -149,6 +150,13 @@ export function checkVersionSources(sources: VersionSources, expectedTagOrVersio
     problems.push(`landing/src/index.html: JSON-LD softwareVersion "${jsonLdMatch[2]}" does not match package.json "${canonical}"`);
   }
 
+  const installUrlMatch = LANDING_INSTALL_URL_RE.exec(sources.landingHtml);
+  if (!installUrlMatch) {
+    problems.push("landing/src/index.html: version-pinned install.sh command not found");
+  } else if (installUrlMatch[2] !== canonical) {
+    problems.push(`landing/src/index.html: install.sh URL version "v${installUrlMatch[2]}" does not match package.json "${canonical}"`);
+  }
+
   const footerMatch = LANDING_FOOTER_RE.exec(sources.landingHtml);
   if (!footerMatch) {
     problems.push("landing/src/index.html: footer version not found");
@@ -188,11 +196,15 @@ export function bumpVersionSources(
   if (!LANDING_JSONLD_RE.test(sources.landingHtml)) {
     throw new Error("landing/src/index.html: JSON-LD softwareVersion not found");
   }
+  if (!LANDING_INSTALL_URL_RE.test(sources.landingHtml)) {
+    throw new Error("landing/src/index.html: version-pinned install.sh command not found");
+  }
   if (!LANDING_FOOTER_RE.test(sources.landingHtml)) {
     throw new Error("landing/src/index.html: footer version not found");
   }
   const landingHtml = sources.landingHtml
     .replace(LANDING_JSONLD_RE, `$1${v}$3`)
+    .replace(LANDING_INSTALL_URL_RE, `$1${v}$3`)
     .replace(LANDING_FOOTER_RE, `$1${v}$3`);
 
   return { packageJson, readmeMd, landingHtml };

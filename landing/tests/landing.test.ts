@@ -597,6 +597,10 @@ describe("landing/build.mjs and page content", () => {
       }
       expect(indexHtml).not.toContain(".gif");
       expect(indexHtml).toContain(
+        "curl -fsSL https://raw.githubusercontent.com/DennisLoska/losql/v0.2.0/install.sh | sh",
+      );
+      expect(indexHtml).not.toContain("git clone");
+      expect(indexHtml).toContain(
         "Open Source · MIT · SQLite &amp; Postgres · Single Binary · Omarchy First · v0.2.0",
       );
 
