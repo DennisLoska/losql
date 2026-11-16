@@ -88,7 +88,7 @@ const enlargedImage = lightbox.querySelector('img');
 for (const button of document.querySelectorAll('.zoomable')) {
   button.addEventListener('click', () => {
     const image = button.querySelector('img');
-    enlargedImage.src = image.currentSrc || image.src;
+    enlargedImage.src = image.getAttribute('src') || image.src;
     enlargedImage.alt = image.alt;
     for (const key of ['static', 'fixedAnimation', 'webp', 'gif']) {
       if (image.dataset[key]) enlargedImage.dataset[key] = image.dataset[key];
