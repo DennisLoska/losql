@@ -1,0 +1,87 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Optional version tag to validate (e.g. v0.2.0)"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      LOSQL_NO_ANIMATIONS: "1"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.9
+
+      - name: Install dependencies (all target platforms)
+        run: bun install --os="*" --cpu="*" --frozen-lockfile
+
+      - name: Check version consistency and changelog
+        run: |
+          if [[ "${GITHUB_REF:-}" == refs/tags/v* ]]; then
+            bun run scripts/release.ts check --tag "${GITHUB_REF_NAME}"
+          elif [[ -n "${{ inputs.tag }}" ]]; then
+            bun run scripts/release.ts check --tag "${{ inputs.tag }}"
+          else
+            bun run scripts/release.ts check
+          fi
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Build release binaries, archives, checksums, and release notes
+        run: bun run scripts/release.ts build --out-dir dist/release
+
+      - name: Verify installer against built release archives
+        run: |
+          VERSION="$(jq -r .version package.json)"
+          mkdir -p /tmp/release-mirror/download/"v${VERSION}"
+          cp dist/release/losql-*.tar.gz dist/release/SHA256SUMS.txt /tmp/release-mirror/download/"v${VERSION}"/
+          LOSQL_RELEASE_BASE_URL="file:///tmp/release-mirror" ./install.sh --version "v${VERSION}" --bin-dir /tmp/installed-bin
+          /tmp/installed-bin/losql --version
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: losql-release-assets
+          path: |
+            dist/release/losql-*.tar.gz
+            dist/release/SHA256SUMS.txt
+            dist/release/RELEASE_NOTES.md
+            install.sh
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          ASSETS=(dist/release/losql-*.tar.gz dist/release/SHA256SUMS.txt install.sh)
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" --clobber "${ASSETS[@]}"
+            gh release edit "$TAG" --title "losql $TAG" --notes-file dist/release/RELEASE_NOTES.md
+          else
+            gh release create "$TAG" --title "losql $TAG" --notes-file dist/release/RELEASE_NOTES.md "${ASSETS[@]}"
+          fi

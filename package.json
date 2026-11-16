@@ -14,12 +14,17 @@
   "bin": { "losql": "src/main.ts" },
   "scripts": {
     "dev": "bun run src/main.ts",
-    "test": "bun test src test landing/tests",
+    "test": "bun test src test scripts landing/tests",
     "typecheck": "tsc --noEmit",
     "check": "bun run typecheck && bun run test",
     "build": "bun run ./build.ts",
     "landing:build": "node ./landing/build.mjs",
-    "verify:tui": "bun run build && scripts/verify-tui.sh"
+    "verify:tui": "bun run build && scripts/verify-tui.sh",
+    "release": "bun run ./scripts/release.ts",
+    "release:check": "bun run ./scripts/release.ts check",
+    "release:notes": "bun run ./scripts/release.ts notes",
+    "release:build": "bun run ./scripts/release.ts build",
+    "release:publish": "bun run ./scripts/release.ts publish"
   },
   "dependencies": {
     "@opentui/core": "0.8.4",

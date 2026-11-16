@@ -141,7 +141,13 @@ Three steps on the first run: connect a database, choose an agent, pick a look. 
 
 ## Quick start
 
-Needs [Bun](https://bun.sh) to build (developed and tested with Bun 1.3.9). The result is a single binary.
+Install the prebuilt binary for Linux (`x86_64`, `arm64`) or macOS (`x86_64`, `arm64`) from [GitHub Releases](https://github.com/DennisLoska/losql/releases):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/DennisLoska/losql/master/install.sh | sh
+```
+
+Or build from source with [Bun](https://bun.sh) (developed and tested with Bun 1.3.9):
 
 ```bash
 git clone https://github.com/DennisLoska/losql.git
@@ -299,9 +305,11 @@ bun run test             # unit, component and end-to-end tests
 bun run typecheck
 bun run build            # ./losql
 bun run verify:tui       # builds, then drives the binary in tmux
+bun run release:check    # verify version sync across package.json, README, landing and CHANGELOG
+bun run release:build    # cross-compile Linux/macOS release tarballs + SHA256SUMS.txt
 ```
 
-Postgres tests run when `LOSQL_TEST_PG_URL` points at a database you can write to. `verify:tui` needs tmux and `perl`; with `LOSQL_VERIFY_PG_URL` set it also checks a Postgres connection. The design is in `docs/specs/`, the decisions in `docs/adr/`, and the vocabulary in `GLOSSARY.md`.
+Postgres tests run when `LOSQL_TEST_PG_URL` points at a database you can write to. `verify:tui` needs tmux and `perl`; with `LOSQL_VERIFY_PG_URL` set it also checks a Postgres connection. The design is in `docs/specs/`, the decisions in `docs/adr/`, the vocabulary in `GLOSSARY.md`, contributor notes in `CONTRIBUTING.md`, release history in `CHANGELOG.md`, and security policy in `SECURITY.md`.
 
 ---
 

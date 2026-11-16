@@ -1,0 +1,19 @@
+name: Feature Request
+description: Propose a feature or improvement for losql
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or workflow
+      description: What workflow or task in `losql` would this improve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behaviour
+      description: How should the feature work (keys, Command, Pane, or CLI flag)?
+    validations:
+      required: true

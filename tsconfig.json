@@ -29,6 +29,6 @@
     "resolveJsonModule": true,
     "types": ["bun"]
   },
-  "include": ["src", "test", "landing", "build.ts"],
+  "include": ["src", "test", "scripts", "landing", "build.ts"],
   "exclude": ["node_modules", "dist", "landing/dist", ".refs"]
 }
