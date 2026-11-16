@@ -48,7 +48,7 @@ describe("landing media and fonts", () => {
     const template = source.match(/const fixture = (`[^]*?`);\n/)!;
     const fixture = new Function("process", "revenue", `return ${template[1]}`)(process, "select 1;");
     let prompt = 'Available actions: {"action":"describe"}, {"action":"query"}, {"action":"answer"}\nuser: Show revenue by customer';
-    for (const expected of ["describe", "query", "answer"]) {
+    for (const expected of ["describe", "query", "answer"] as const) {
       const child = Bun.spawn([process.execPath, "-e", fixture.replace(/^#![^\n]*\n/, "")], {
         stdin: new Blob([prompt]), stdout: "pipe", stderr: "pipe",
       });

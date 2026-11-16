@@ -191,7 +191,10 @@ console.log(JSON.stringify({type:'text',part:{text:JSON.stringify(actions[Math.m
 header{height:42px;background:#20212be8;border-bottom:1px solid #ffffff12;position:relative;text-align:center;font:12px mono;color:#9398ae;padding:12px}.dots{position:absolute;left:16px;top:15px;display:flex;gap:8px}.dots i{width:11px;height:11px;border-radius:50%;background:#ff6059}.dots i:nth-child(2){background:#ffbd2e}.dots i:nth-child(3){background:#28c840}
 pre{margin:0;padding:16px;font:16px/21px mono;font-variant-ligatures:none;white-space:pre;letter-spacing:0;min-height:872px}span{border-radius:0}
 </style><div class="window"><header><div class="dots"><i></i><i></i><i></i></div>losql demo</header><pre>${ansiHtml(ansi)}</pre></div>`);
-    await page.evaluate(() => document.fonts.ready);
+    await page.evaluate(() => {
+      const { document } = globalThis as unknown as { document: { fonts?: { ready?: Promise<unknown> } } };
+      return document.fonts?.ready;
+    });
     await page.screenshot({ path: join(work, `${name}.png`) });
   }
   const statics = ["hero", "editor", "agent", "json", "record", "zoom", "providers", "themes", "menu", "onboarding", "omarchy", "omarchy-transparent"];
