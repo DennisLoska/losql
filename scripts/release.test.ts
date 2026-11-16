@@ -42,7 +42,7 @@ describe("version & tag validation", () => {
       packageJson: JSON.stringify({ name: "losql", version: "0.2.0" }, null, 2),
       readmeMd: '<img src="https://img.shields.io/badge/version-0.2.0-9ece6a?style=flat-square" alt="version 0.2.0" />',
       landingHtml:
-        '<script type="application/ld+json">{"softwareVersion":"0.2.0"}</script><p class="footer-facts">Open Source · MIT · SQLite &amp; Postgres · Single Binary · Omarchy First · v0.2.0</p>',
+        '<script type="application/ld+json">{"softwareVersion":"0.2.0"}</script><code id="install-command">curl -fsSL https://raw.githubusercontent.com/DennisLoska/losql/v0.2.0/install.sh | sh</code><p class="footer-facts">Open Source · MIT · SQLite &amp; Postgres · Single Binary · Omarchy First · v0.2.0</p>',
       changelogMd: "# Changelog\n\n## [0.2.0] - 2026-11-16\n\n- Initial release.\n",
     };
 
@@ -63,9 +63,16 @@ describe("version & tag validation", () => {
     const driftedLanding = checkVersionSources({
       ...validSources,
       landingHtml:
-        '<script type="application/ld+json">{"softwareVersion":"0.1.0"}</script><p class="footer-facts">Open Source · MIT · SQLite &amp; Postgres · Single Binary · Omarchy First · v0.2.0</p>',
+        '<script type="application/ld+json">{"softwareVersion":"0.1.0"}</script><code id="install-command">curl -fsSL https://raw.githubusercontent.com/DennisLoska/losql/v0.2.0/install.sh | sh</code><p class="footer-facts">Open Source · MIT · SQLite &amp; Postgres · Single Binary · Omarchy First · v0.2.0</p>',
     });
     expect(driftedLanding.some((p) => p.includes("landing/src/index.html"))).toBe(true);
+
+    const driftedInstallUrl = checkVersionSources({
+      ...validSources,
+      landingHtml:
+        '<script type="application/ld+json">{"softwareVersion":"0.2.0"}</script><code id="install-command">curl -fsSL https://raw.githubusercontent.com/DennisLoska/losql/v0.1.0/install.sh | sh</code><p class="footer-facts">Open Source · MIT · SQLite &amp; Postgres · Single Binary · Omarchy First · v0.2.0</p>',
+    });
+    expect(driftedInstallUrl.some((p) => p.includes("install.sh"))).toBe(true);
 
     const missingChangelog = checkVersionSources({
       ...validSources,
@@ -80,7 +87,7 @@ describe("version & tag validation", () => {
       readmeMd:
         'Header\n<img src="https://img.shields.io/badge/version-0.2.0-9ece6a?style=flat-square" alt="version 0.2.0" />\nFooter\n',
       landingHtml:
-        '<script type="application/ld+json">{"softwareVersion":"0.2.0"}</script>\n<p class="footer-facts">Open Source · MIT · SQLite &amp; Postgres · Single Binary · Omarchy First · v0.2.0</p>\n',
+        '<script type="application/ld+json">{"softwareVersion":"0.2.0"}</script>\n<code id="install-command">curl -fsSL https://raw.githubusercontent.com/DennisLoska/losql/v0.2.0/install.sh | sh</code>\n<p class="footer-facts">Open Source · MIT · SQLite &amp; Postgres · Single Binary · Omarchy First · v0.2.0</p>\n',
       changelogMd: "# Changelog\n\n## [0.3.0] - 2026-11-16\n\n- Next release.\n",
     };
 
@@ -89,6 +96,7 @@ describe("version & tag validation", () => {
     expect(bumped.readmeMd).toContain("version-0.3.0-9ece6a");
     expect(bumped.readmeMd).toContain('alt="version 0.3.0"');
     expect(bumped.landingHtml).toContain('"softwareVersion":"0.3.0"');
+    expect(bumped.landingHtml).toContain("https://raw.githubusercontent.com/DennisLoska/losql/v0.3.0/install.sh");
     expect(bumped.landingHtml).toContain("Omarchy First · v0.3.0</p>");
     expect(checkVersionSources({ ...bumped, changelogMd: initial.changelogMd }, "v0.3.0")).toEqual([]);
   });

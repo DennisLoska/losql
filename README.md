@@ -144,7 +144,7 @@ Three steps on the first run: connect a database, choose an agent, pick a look. 
 Install the prebuilt binary for Linux (`x86_64`, `arm64`) or macOS (`x86_64`, `arm64`) from [GitHub Releases](https://github.com/DennisLoska/losql/releases):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/DennisLoska/losql/master/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/DennisLoska/losql/v0.2.0/install.sh | sh
 ```
 
 Or build from source with [Bun](https://bun.sh) (developed and tested with Bun 1.3.9):
