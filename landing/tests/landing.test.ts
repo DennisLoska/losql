@@ -3,17 +3,162 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
+import { runInNewContext } from "node:vm";
 
 const ROOT = join(import.meta.dir, "..", "..");
 const BUILD_SCRIPT = join(ROOT, "landing", "build.mjs");
 
-describe("landing/build.mjs and page content", () => {
-  test("built page runs interactive site.js behavior in headless Chromium", async () => {
-    const chromium = ["chromium", "chromium-browser", "google-chrome", "google-chrome-stable"]
-      .map((binary) => spawnSync("which", [binary], { encoding: "utf8" }).stdout.trim())
-      .find(Boolean);
-    expect(chromium).not.toBeNull();
+// A deliberately small DOM for this page's progressive enhancement script. Elements,
+// attributes and text come from the built HTML, never a hand-authored page fixture.
+function createPageDOM(html: string) {
+  type Event = {
+    type: string;
+    key?: string;
+    target?: Element;
+    defaultPrevented?: boolean;
+    preventDefault(): void;
+  };
+  const decode = (text: string) => text.replace(/&(#x[\da-f]+|#\d+|amp|quot|apos|lt|gt);/gi, (entity, name: string) => {
+    if (name.startsWith("#")) return String.fromCodePoint(name[1]?.toLowerCase() === "x" ? parseInt(name.slice(2), 16) : Number(name.slice(1)));
+    return ({ amp: "&", quot: '"', apos: "'", lt: "<", gt: ">" } as Record<string, string>)[name] ?? entity;
+  });
+  const dataAttribute = (key: string) => `data-${key.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)}`;
+  let activeElement: Element | null = null;
 
+  class Element {
+    attributes = new Map<string, string>();
+    children: (Element | string)[] = [];
+    parent: Element | null = null;
+    listeners = new Map<string, ((event: Event) => unknown)[]>();
+    dataset = new Proxy({} as Record<string, string>, {
+      get: (_, key: string) => this.getAttribute(dataAttribute(key)) ?? undefined,
+      set: (_, key: string, value: string) => { this.setAttribute(dataAttribute(key), value); return true; },
+      deleteProperty: (_, key: string) => { this.removeAttribute(dataAttribute(key)); return true; },
+      ownKeys: () => [...this.attributes.keys()].filter((key) => key.startsWith("data-")).map((key) => key.slice(5).replace(/-([a-z])/g, (_, letter: string) => letter.toUpperCase())),
+      getOwnPropertyDescriptor: () => ({ configurable: true, enumerable: true }),
+    });
+    constructor(readonly tag: string) {}
+    getAttribute(name: string) { return this.attributes.get(name) ?? null; }
+    setAttribute(name: string, value: string) { this.attributes.set(name, String(value)); }
+    removeAttribute(name: string) { this.attributes.delete(name); }
+    get id() { return this.getAttribute("id") ?? ""; }
+    get tabIndex() { return Number(this.getAttribute("tabindex") ?? (this.tag === "button" ? 0 : -1)); }
+    set tabIndex(value: number) { this.setAttribute("tabindex", String(value)); }
+    get hidden() { return this.attributes.has("hidden"); }
+    set hidden(value: boolean) { if (value) this.setAttribute("hidden", ""); else this.removeAttribute("hidden"); }
+    get open() { return this.attributes.has("open"); }
+    get src() { return this.getAttribute("src") ? new URL(this.getAttribute("src")!, "https://losql.dev/").href : ""; }
+    set src(value: string) { this.setAttribute("src", value); }
+    get currentSrc() { return this.src; }
+    get alt() { return this.getAttribute("alt") ?? ""; }
+    set alt(value: string) { this.setAttribute("alt", value); }
+    get textContent(): string { return this.children.map((child) => typeof child === "string" ? child : child.textContent).join(""); }
+    set textContent(value: string) { this.children = [value]; }
+    matches(selector: string): boolean {
+      const match = selector.match(/^([a-z][\w-]*)?(?:#([\w-]+)|\.([\w-]+)|\[([\w-]+)(?:="([^"]*)")?\])?$/i);
+      if (!match || !match[0]) throw new Error(`Unsupported DOM selector: ${selector}`);
+      const [, tag, id, className, attribute, value] = match;
+      return (!tag || this.tag === tag) && (!id || this.id === id)
+        && (!className || (this.getAttribute("class") ?? "").split(/\s+/).includes(className))
+        && (!attribute || (value === undefined ? this.attributes.has(attribute) : this.getAttribute(attribute) === value));
+    }
+    querySelectorAll(selector: string): Element[] {
+      const parts = selector.trim().split(/\s+/);
+      const matches = (element: Element) => {
+        if (!element.matches(parts.at(-1)!)) return false;
+        let ancestor = element.parent;
+        for (let i = parts.length - 2; i >= 0; i--) {
+          while (ancestor && !ancestor.matches(parts[i]!)) ancestor = ancestor.parent;
+          if (!ancestor) return false;
+          ancestor = ancestor.parent;
+        }
+        return true;
+      };
+      const result: Element[] = [];
+      const visit = (node: Element) => {
+        for (const child of node.children) if (child instanceof Element) {
+          if (matches(child)) result.push(child);
+          visit(child);
+        }
+      };
+      visit(this);
+      return result;
+    }
+    querySelector(selector: string): Element {
+      const element = this.querySelectorAll(selector)[0];
+      if (!element) throw new Error(`Missing DOM element: ${selector}`);
+      return element;
+    }
+    addEventListener(type: string, listener: (event: Event) => unknown) {
+      this.listeners.set(type, [...(this.listeners.get(type) ?? []), listener]);
+    }
+    dispatchEvent(event: Event) {
+      event.target ??= this;
+      for (let node: Element | null = this; node; node = node.parent) {
+        for (const listener of node.listeners.get(event.type) ?? []) listener(event);
+      }
+      return !event.defaultPrevented;
+    }
+    fire(type: string, key?: string) {
+      return this.dispatchEvent({ type, key, preventDefault() { this.defaultPrevented = true; } });
+    }
+    focus() { activeElement = this; }
+    click() {
+      if (!this.fire("click")) return;
+      // Native form submission in a method=dialog form closes its containing dialog.
+      if (this.tag === "button") {
+        let form = this.parent;
+        while (form && form.tag !== "form") form = form.parent;
+        if (form?.getAttribute("method") === "dialog") {
+          let dialog = form.parent;
+          while (dialog && dialog.tag !== "dialog") dialog = dialog.parent;
+          dialog?.close();
+        }
+      }
+    }
+    keydown(key: string) {
+      if (this.fire("keydown", key) && key === "Escape") {
+        // Escape's native default action requests cancellation of a modal dialog.
+        const dialog = document.querySelectorAll("dialog").find((item) => item.open);
+        if (dialog?.fire("cancel")) dialog.close();
+      }
+    }
+    showModal() { this.setAttribute("open", ""); }
+    close() { this.removeAttribute("open"); this.fire("close"); }
+  }
+
+  const document = new Element("document");
+  const stack = [document];
+  const voidTags = new Set(["area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"]);
+  const tokens = html.match(/<!--[\s\S]*?-->|<![^>]*>|<\/?[a-z][^>]*>|[^<]+/gi) ?? [];
+  for (const token of tokens) {
+    if (token.startsWith("<!")) continue;
+    if (token.startsWith("</")) {
+      const tag = token.slice(2, -1).trim().toLowerCase();
+      if (stack.at(-1)?.tag !== tag) throw new Error(`Unbalanced HTML closing tag: ${tag}`);
+      stack.pop();
+    } else if (token.startsWith("<")) {
+      const [, tag, attributes] = token.match(/^<([\w-]+)([\s\S]*?)\/?\s*>$/)!;
+      const element = new Element(tag!.toLowerCase());
+      for (const match of attributes!.matchAll(/([^\s=/>]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+)))?/g)) {
+        element.setAttribute(match[1]!.toLowerCase(), decode(match[2] ?? match[3] ?? match[4] ?? ""));
+      }
+      element.parent = stack.at(-1)!;
+      element.parent.children.push(element);
+      if (!voidTags.has(element.tag) && !token.endsWith("/>")) stack.push(element);
+    } else stack.at(-1)!.children.push(decode(token));
+  }
+  if (stack.length !== 1) throw new Error("Unclosed HTML elements");
+  return {
+    document: Object.assign(document, {
+      getElementById(id: string) { return document.querySelector(`#${id}`); },
+    }),
+    get activeElement() { return activeElement; },
+  };
+}
+
+describe("landing/build.mjs and page content", () => {
+  test("built page runs interactive site.js behavior in a deterministic DOM", async () => {
     const outDir = mkdtempSync(join(tmpdir(), "losql-landing-smoke-"));
     try {
       const build = spawnSync("node", [BUILD_SCRIPT], {
@@ -22,78 +167,127 @@ describe("landing/build.mjs and page content", () => {
         encoding: "utf8",
       });
       expect(build.status).toBe(0);
+      const page = createPageDOM(readFileSync(join(outDir, "index.html"), "utf8"));
+      const { document } = page;
+      const copied: string[] = [];
+      const timers: { callback: () => void; delay: number }[] = [];
+      const motionPreference = { matches: false, addEventListener() {} };
+      runInNewContext(readFileSync(join(outDir, "assets/site.js"), "utf8"), {
+        document,
+        navigator: { clipboard: { async writeText(text: string) { copied.push(text); } } },
+        window: {
+          matchMedia: () => motionPreference,
+          setTimeout(callback: () => void, delay: number) { timers.push({ callback, delay }); return timers.length; },
+        },
+      }, { filename: "built/assets/site.js", timeout: 1000 });
 
-      const indexPath = join(outDir, "index.html");
-      // A file URL treats root-relative paths as filesystem-root paths. Rewrite only the
-      // temporary build copy so the real built assets remain resolvable under file://.
-      let html = readFileSync(indexPath, "utf8").replace(/([="'])\/(?!\/)/g, "$1");
-      const probe = String.raw`<script>
-Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async (text) => { window.__copied = text; } } });
-window.addEventListener('load', async () => {
-  const result = {};
-  const groups = [...document.querySelectorAll('[data-tabs]')];
-  const required = ['Recorded workflows', 'Product tour stops', 'Omarchy and Theme previews', 'Headless commands'];
-  result.tabGroups = required.map((label) => {
-    const group = groups.find((item) => item.querySelector('[role="tablist"]').getAttribute('aria-label') === label);
-    if (!group) return { label, missing: true };
-    const tabs = [...group.querySelectorAll('[role="tab"]')];
-    const check = (index) => ({ selected: tabs.filter((tab) => tab.getAttribute('aria-selected') === 'true').length === 1 && tabs[index].getAttribute('aria-selected') === 'true', tabIndex: tabs[index].tabIndex === 0 && tabs.every((tab, i) => i === index || tab.tabIndex === -1), panels: tabs.every((tab, i) => document.getElementById(tab.getAttribute('aria-controls')).hidden === (i !== index)) });
-    const event = (index, key) => { tabs[index].dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true })); const target = key === 'End' ? tabs.length - 1 : key === 'Home' ? 0 : key === 'ArrowRight' ? (index + 1) % tabs.length : (index - 1 + tabs.length) % tabs.length; return check(target); };
-    return { label, right: event(0, 'ArrowRight'), left: event(1, 'ArrowLeft'), home: event(1, 'Home'), end: event(0, 'End') };
-  });
-  const heroTabs = [...document.querySelectorAll('[role="tab"]')].filter((tab) => tab.id.startsWith('hero-mode-tab-'));
-  heroTabs[1].click();
-  result.heroLive = { src: document.querySelector('#hero-mode-panel-1 img').getAttribute('src'), selected: heroTabs[1].getAttribute('aria-selected') };
-  heroTabs[0].click();
-  result.heroStatic = { src: document.querySelector('#hero-mode-panel-0 img').getAttribute('src'), selected: heroTabs[0].getAttribute('aria-selected') };
-  document.querySelector('.motion-toggle').click();
-  document.querySelector('.motion-toggle').click();
-  document.querySelector('[data-format="gif"]').click();
-  result.format = { selected: document.querySelector('[data-format="gif"]').getAttribute('aria-pressed'), gifs: [...document.querySelectorAll('img[data-static]')].filter((img) => img.getAttribute('src').endsWith('.gif')).length };
-  const copyButton = document.querySelector('[data-copy]');
-  const command = document.getElementById(copyButton.dataset.copy).textContent;
-  copyButton.click();
-  await Promise.resolve();
-  await Promise.resolve();
-  result.copy = { copied: window.__copied, command, copiedState: copyButton.dataset.copied };
-  const trigger = document.querySelector('.zoomable');
-  const selectedImage = trigger.querySelector('img');
-  trigger.click();
-  const dialog = document.getElementById('lightbox');
-  result.lightboxOpen = { open: dialog.open, src: dialog.querySelector('img').getAttribute('src'), selected: selectedImage.getAttribute('src') };
-  dialog.requestClose(); // the browser's native Escape close request for a modal dialog
-  result.lightboxClosed = !dialog.open;
-  document.title = 'SMOKE:' + btoa(JSON.stringify(result));
-});
-</script>`;
-      html = html.replace("</body>", `${probe}</body>`);
-      require("node:fs").writeFileSync(indexPath, html);
+      const groups = document.querySelectorAll("[data-tabs]");
+      const required = ["Recorded workflows", "Product tour stops", "Omarchy and Theme previews", "Headless commands"];
+      for (const label of required) {
+        const group = groups.find((item) => item.querySelector('[role="tablist"]').getAttribute("aria-label") === label);
+        expect(group).toBeDefined();
+        const tabs = group!.querySelectorAll('[role="tab"]');
+        expect(tabs.length).toBeGreaterThan(1);
+        const check = (selected: number) => {
+          for (const [index, tab] of tabs.entries()) {
+            expect(tab.getAttribute("aria-selected")).toBe(String(index === selected));
+            expect(tab.tabIndex).toBe(index === selected ? 0 : -1);
+            expect(document.getElementById(tab.getAttribute("aria-controls")!).hidden).toBe(index !== selected);
+          }
+        };
+        check(0);
+        // Visit every tab in both directions, including wraparound at both ends.
+        for (let index = 0; index < tabs.length; index++) {
+          tabs[index]!.keydown("ArrowRight");
+          check((index + 1) % tabs.length);
+          expect(page.activeElement).toBe(tabs[(index + 1) % tabs.length]);
+        }
+        for (let index = 0; index < tabs.length; index++) {
+          const current = (tabs.length - index) % tabs.length;
+          const next = (current - 1 + tabs.length) % tabs.length;
+          tabs[current]!.keydown("ArrowLeft");
+          check(next);
+          expect(page.activeElement).toBe(tabs[next]);
+        }
+        tabs[0]!.keydown("End");
+        check(tabs.length - 1);
+        expect(page.activeElement).toBe(tabs.at(-1)!);
+        tabs.at(-1)!.keydown("Home");
+        check(0);
+        expect(page.activeElement).toBe(tabs[0]);
+      }
 
-      const run = spawnSync(chromium!, [
-        "--headless=new", "--no-sandbox", "--disable-gpu", `--user-data-dir=${join(outDir, "profile")}`,
-        "--virtual-time-budget=3000", "--dump-dom", `file://${indexPath}`,
-      ], { encoding: "utf8", timeout: 30_000 });
-      expect(run.status).toBe(0);
-      const encoded = run.stdout.match(/<title>SMOKE:([^<]+)<\/title>/)?.[1];
-      expect(encoded).toBeDefined();
-      const result = JSON.parse(Buffer.from(encoded!, "base64").toString("utf8"));
+      const staticTab = document.getElementById("hero-mode-tab-0");
+      const liveTab = document.getElementById("hero-mode-tab-1");
+      const staticImage = document.querySelector("#hero-mode-panel-0 img");
+      const liveImage = document.querySelector("#hero-mode-panel-1 img");
+      const gifImage = document.querySelector("#hero-mode-panel-2 img");
+      liveTab.click();
+      expect(liveTab.getAttribute("aria-selected")).toBe("true");
+      expect(staticTab.getAttribute("aria-selected")).toBe("false");
+      expect(document.getElementById("hero-mode-panel-1").hidden).toBe(false);
+      expect(document.getElementById("hero-mode-panel-0").hidden).toBe(true);
+      expect(liveImage.getAttribute("src")).toBe("/media/workflow-tour.webp");
+      expect(gifImage.getAttribute("src")).toBe("/media/workflow-tour.gif");
+      staticTab.click();
+      expect(staticTab.getAttribute("aria-selected")).toBe("true");
+      expect(liveTab.getAttribute("aria-selected")).toBe("false");
+      expect(document.getElementById("hero-mode-panel-0").hidden).toBe(false);
+      expect(document.getElementById("hero-mode-panel-1").hidden).toBe(true);
+      expect(staticImage.getAttribute("src")).toBe("/media/hero.webp");
 
-      expect(result.tabGroups).toHaveLength(4);
-      for (const group of result.tabGroups) {
-        expect(group.missing).toBeUndefined();
-        for (const key of ["right", "left", "home", "end"]) {
-          expect(group[key]).toEqual({ selected: true, tabIndex: true, panels: true });
+      const motion = document.querySelector(".motion-toggle");
+      const recordings = document.querySelectorAll("img[data-static]");
+      expect(recordings.length).toBeGreaterThan(0);
+      expect(motion.getAttribute("aria-pressed")).toBe("true");
+      motion.click();
+      expect(motion.getAttribute("aria-pressed")).toBe("false");
+      for (const image of recordings) expect(image.getAttribute("src")).toBe(image.dataset.static);
+      motion.click();
+      expect(motion.getAttribute("aria-pressed")).toBe("true");
+      for (const image of recordings) expect(image.getAttribute("src")).toBe(image.dataset.fixedAnimation || image.dataset.webp);
+
+      const gif = document.querySelector('[data-format="gif"]');
+      const webp = document.querySelector('[data-format="webp"]');
+      for (const [format, selected, other] of [["gif", gif, webp], ["webp", webp, gif]] as const) {
+        selected.click();
+        expect(selected.getAttribute("aria-pressed")).toBe("true");
+        expect(other.getAttribute("aria-pressed")).toBe("false");
+        for (const image of recordings) {
+          expect(image.getAttribute("src")).toBe(image.dataset.fixedAnimation || image.dataset[format]);
+          if (!image.dataset.fixedAnimation) expect(image.getAttribute("src")).toEndWith(`.${format}`);
         }
       }
-      expect(result.heroLive).toEqual({ src: "media/workflow-tour.webp", selected: "true" });
-      expect(result.heroStatic).toEqual({ src: "media/hero.webp", selected: "true" });
-      expect(result.format.selected).toBe("true");
-      expect(result.format.gifs).toBeGreaterThan(0);
-      expect(result.copy.copied).toBe(result.copy.command);
-      expect(result.copy.copiedState).toBe("true");
-      expect(result.lightboxOpen.open).toBe(true);
-      expect(result.lightboxOpen.src).toEndWith(`/${result.lightboxOpen.selected}`);
-      expect(result.lightboxClosed).toBe(true);
+
+      const copy = document.querySelector("[data-copy]");
+      const command = document.getElementById(copy.dataset.copy!).textContent;
+      expect(command).toBe('losql exec -c demo "select count(*) from orders"');
+      copy.click();
+      await Promise.resolve();
+      expect(copied).toEqual([command]);
+      expect(copy.dataset.copied).toBe("true");
+      expect(document.getElementById("copy-status").textContent).toBe("Command copied to clipboard.");
+      expect(timers).toHaveLength(1);
+      expect(timers[0]!.delay).toBe(2500);
+      timers[0]!.callback();
+      expect(copy.dataset.copied).toBeUndefined();
+      expect(copy.textContent).toBe("Copy");
+
+      const dialog = document.getElementById("lightbox");
+      const enlarged = document.querySelector("#lightbox img");
+      const trigger = document.querySelector(".zoomable");
+      const image = trigger.querySelector("img");
+      expect(dialog.open).toBe(false);
+      for (const close of [() => dialog.keydown("Escape"), () => dialog.querySelector("button").click()]) {
+        trigger.click();
+        expect(dialog.open).toBe(true);
+        expect(enlarged.src).toBe(image.src);
+        expect(enlarged.alt).toBe(image.alt);
+        expect(enlarged.alt.length).toBeGreaterThan(0);
+        close();
+        expect(dialog.open).toBe(false);
+        expect(enlarged.getAttribute("src")).toBeNull();
+      }
     } finally {
       rmSync(outDir, { recursive: true, force: true });
     }
