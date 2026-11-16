@@ -8,6 +8,47 @@ const ROOT = join(import.meta.dir, "..", "..");
 const BUILD_SCRIPT = join(ROOT, "landing", "build.mjs");
 
 describe("landing/build.mjs and page content", () => {
+  test("CLI panels render captured binary stdout and stderr", () => {
+    const outDir = mkdtempSync(join(tmpdir(), "losql-cli-output-"));
+    try {
+      const build = spawnSync("node", [BUILD_SCRIPT], {
+        cwd: ROOT,
+        env: { ...process.env, LANDING_OUT: outDir },
+        encoding: "utf8",
+      });
+      expect(build.status).toBe(0);
+      const html = readFileSync(join(outDir, "index.html"), "utf8");
+      const captures = [
+        {
+          "panel": 0,
+          "stdout": " count(*) \n----------\n       12 \n(1 row)\n",
+          "stderr": ""
+        },
+        {
+          "panel": 1,
+          "stdout": "select c.name, c.country,\n       round(sum(i.quantity * i.unit_price), 2)\n         as revenue\nfrom customers c\njoin orders o on o.customer_id = c.id\njoin order_items i on i.order_id = o.id\ngroup by c.id\norder by revenue desc;\n name              | country | revenue \n-------------------+---------+---------\n Ada Lovelace      | UK      |     342 \n Barbara Liskov    | US      |     310 \n Alan Turing       | UK      |   238.5 \n Margaret Hamilton | US      |     214 \n Ken Thompson      | US      |     194 \n Grace Hopper      | US      |   185.5 \n Linus Torvalds    | FI      |   182.5 \n Edsger Dijkstra   | NL      |     168 \n(8 rows)\n",
+          "stderr": "losql: describe customers, orders, order_items\nlosql: query select c.name, count(o.id) as orders from customers c join orders o on o.customer_id = c.id group by c.id\nRevenue by customer, verified against the demo database. Ada leads with multiple orders. Review the SQL before running.\n"
+        },
+        {
+          "panel": 2,
+          "stdout": "Claude Code  1.0.0  /tmp/losql-cli-uIQQHv/bin/claude  replied in 0.0s\nCodex  1.0.0  /tmp/losql-cli-uIQQHv/bin/codex  replied in 0.0s\nOpenCode  1.0.0  /tmp/losql-cli-uIQQHv/bin/opencode  replied in 0.0s\nAntigravity  1.0.0  /tmp/losql-cli-uIQQHv/bin/antigravity  replied in 0.0s\n",
+          "stderr": ""
+        }
+      ];
+      for (const { panel, stdout, stderr } of captures) {
+        const content = html.match(new RegExp(`<div role="tabpanel" id="cli-command-panel-${panel}"[\\s\\S]*?(?=<div role="tabpanel"|</section>)`))?.[0];
+        expect(content).toBeDefined();
+        for (const [stream, output] of [["stdout", stdout], ["stderr", stderr]]) {
+          if (!output) continue;
+          const escaped = output.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+          expect(content).toContain(`<pre aria-label="${stream}"><code>${escaped}</code></pre>`);
+        }
+      }
+    } finally {
+      rmSync(outDir, { recursive: true, force: true });
+    }
+  });
+
   test("build.mjs uses only Node standard library imports and builds into LANDING_OUT from any cwd", () => {
     const buildSource = readFileSync(BUILD_SCRIPT, "utf8");
     const imports = [...buildSource.matchAll(/from\s+["']([^"']+)["']/g)].map((m) => m[1]);
