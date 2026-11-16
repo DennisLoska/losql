@@ -48,8 +48,9 @@ nav { display: flex; gap: 20px; align-items: center; }
 .hero { padding-top: 82px; padding-bottom: 70px; text-align: center; }
 .hero h1 { max-width: 900px; margin: 0 auto 24px; animation: fadeUp .65s both; }
 .hero-subtitle { max-width: 660px; font-size: 18px; line-height: 1.8; margin: auto; animation: fadeUp .65s .08s both; }
-.hero-install { max-width: 720px; margin: 28px auto 0; animation: fadeUp .65s .11s both; }
-.hero-install .command { margin-block: 0; padding: 14px 18px; align-items: center; border-color: var(--border-strong); background: rgba(8,8,8,.92); text-align: left; }
+.hero-install { width: fit-content; max-width: 100%; margin: 28px auto 0; animation: fadeUp .65s .11s both; }
+.hero-install .command { display: inline-flex; width: auto; max-width: 100%; margin-block: 0; padding: 12px 14px 12px 18px; gap: 14px; align-items: center; border-color: var(--border-strong); background: rgba(8,8,8,.92); text-align: left; }
+.hero-install .command pre { flex: 0 1 auto; }
 .hero-install .prompt { font: 600 13px var(--font-mono); color: var(--accent); user-select: none; }
 .actions { display: flex; align-items: center; justify-content: center; gap: 14px; margin: 24px 0 48px; }
 .text-link { font-size: 12px; color: var(--fg-muted); border-bottom: 1px solid var(--border-strong); padding-block: 4px; }
@@ -86,16 +87,18 @@ nav { display: flex; gap: 20px; align-items: center; }
 .palette span { width: 42px; height: 8px; background: var(--swatch); border-radius: 2px; }
 #cli .tab-group { border: 1px solid var(--border); border-radius: 12px; overflow: hidden; background: var(--bg-card); }
 .command { position: relative; display: flex; align-items: start; gap: 10px; margin-block: 16px; padding: 20px; border: 1px solid var(--border); background: var(--bg-elev); border-radius: 9px; min-width: 0; }
-.command pre { margin: 0; overflow-x: auto; flex: 1; padding-block: 4px; font-size: 12px; line-height: 1.9; }
+.command pre { margin: 0; overflow-x: auto; scrollbar-width: none; flex: 1; padding-block: 4px; font-size: 12px; line-height: 1.9; }
+.command pre::-webkit-scrollbar { display: none; }
 .command code { white-space: pre; overflow-wrap: normal; }
 .copy-btn { flex: none; color: var(--fg-muted); background: var(--bg-card); border: 1px solid var(--border-strong); padding: 5px 10px; border-radius: 5px; font-size: 10px; }
 #cli .command { margin: 24px; }
-.install-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 35px; }
+.install-grid { display: grid; grid-template-columns: 1.25fr 1fr; gap: 35px; }
 .install-grid > article { min-width: 0; }
 .install-grid h3 { margin-top: 10px; }
 .install-grid p { font-size: 14px; line-height: 1.7; }
 .credits-grid { display: grid; grid-template-columns: repeat(4,1fr); gap: 1px; background: var(--border); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
 .credits-grid article { background: var(--bg); padding: 26px; }
+.credits-grid article:last-child { grid-column: span 2; }
 .credits-grid h3 { font-size: 15px; margin-bottom: 13px; }
 .credits-grid a:hover h3 { color: var(--accent); }
 .credits-grid p { font-size: 14px; line-height: 1.7; }
@@ -114,7 +117,7 @@ body:has(dialog[open]) { overflow: hidden; }
 .skip-link:focus { position: fixed; z-index: 100; left: 12px; top: 12px; padding: 14px; background: #fff; color: #000; }
 .not-found { min-height: 100dvh; display: flex; flex-direction: column; justify-content: center; align-items: start; gap: 25px; }
 @keyframes fadeUp { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
-@media (max-width: 1150px) { .nav-inner { flex-wrap: wrap; gap: 12px; } .credits-grid { grid-template-columns: repeat(2,1fr); } }
+@media (max-width: 1150px) { .nav-inner { flex-wrap: wrap; gap: 12px; } .credits-grid { grid-template-columns: repeat(2,1fr); } .credits-grid article:last-child { grid-column: 1 / -1; } }
 @media (max-width: 700px) {
   .media-note, .media-controls > span, .footer-facts, .footer-copy, footer nav, .install-grid p, .credits-grid p { font-size: 13px; }
   .container { width: calc(100% - 32px); } .nav-inner { width: calc(100% - 32px); padding: 10px 0; gap: 8px; } .header-actions { gap: 8px; } .brand { font-size: 20px; } .nav-inner .btn { font-size: 10px; padding: 7px 12px; }
