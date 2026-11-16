@@ -29,29 +29,23 @@ for (const group of groups) {
 
 const motionPreference = window.matchMedia('(prefers-reduced-motion: reduce)');
 let playing = !motionPreference.matches;
-let format = 'webp';
 const motionButton = document.querySelector('.motion-toggle');
 function updateRecordings() {
   for (const image of document.querySelectorAll('img[data-static]')) {
-    const source = playing ? (image.dataset.fixedAnimation || image.dataset[format]) : image.dataset.static;
+    const source = playing ? image.dataset.webp : image.dataset.static;
     if (image.getAttribute('src') !== source) image.setAttribute('src', source);
   }
-  motionButton.textContent = playing ? 'Pause recordings' : 'Play recordings';
-  motionButton.setAttribute('aria-pressed', String(playing));
+  if (motionButton) {
+    motionButton.textContent = playing ? 'Pause recordings' : 'Play recordings';
+    motionButton.setAttribute('aria-pressed', String(playing));
+  }
 }
-for (const button of document.querySelectorAll('[data-format]')) {
-  button.addEventListener('click', () => {
-    format = button.dataset.format;
-    for (const other of document.querySelectorAll('[data-format]')) {
-      other.setAttribute('aria-pressed', String(other === button));
-    }
+if (motionButton) {
+  motionButton.addEventListener('click', () => {
+    playing = !playing;
     updateRecordings();
   });
 }
-motionButton.addEventListener('click', () => {
-  playing = !playing;
-  updateRecordings();
-});
 motionPreference.addEventListener('change', (event) => {
   playing = !event.matches;
   updateRecordings();
@@ -88,9 +82,10 @@ const enlargedImage = lightbox.querySelector('img');
 for (const button of document.querySelectorAll('.zoomable')) {
   button.addEventListener('click', () => {
     const image = button.querySelector('img');
+    for (const key of Object.keys(enlargedImage.dataset)) delete enlargedImage.dataset[key];
     enlargedImage.src = image.getAttribute('src') || image.src;
     enlargedImage.alt = image.alt;
-    for (const key of ['static', 'fixedAnimation', 'webp', 'gif']) {
+    for (const key of ['static', 'webp']) {
       if (image.dataset[key]) enlargedImage.dataset[key] = image.dataset[key];
     }
     lightbox.showModal();
