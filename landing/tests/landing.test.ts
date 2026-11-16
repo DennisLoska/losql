@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 
 const ROOT = join(import.meta.dir, "..", "..");
@@ -173,17 +173,22 @@ describe("landing/build.mjs and page content", () => {
       const pages = ["index.html", "404.html"];
       const pageContents = new Map(pages.map((page) => [page, readFileSync(join(outDir, page), "utf8")]));
       for (const [page, html] of pageContents) {
-        for (const match of html.matchAll(/\b(?:src|href)=["'](\/[^"']*)["']/g)) {
-          const localPath = match[1].split(/[?#]/, 1)[0];
-          const outputPath = localPath === "/" ? "index.html" : localPath.slice(1);
-          expect(existsSync(join(outDir, outputPath))).toBe(true);
-        }
-      }
+        const ids = new Set([...html.matchAll(/\bid=["']([^"']+)["']/g)].map((match) => match[1]));
+        for (const match of html.matchAll(/\b(?:src|href)=["']([^"']*)["']/g)) {
+          const attr = match[1];
+          if (attr.startsWith("#")) {
+            expect(ids.has(attr.slice(1))).toBe(true);
+            continue;
+          }
+          if (/^(?:https?:\/\/|mailto:|data:)/.test(attr)) continue;
 
-      const indexHtml = pageContents.get("index.html");
-      const ids = new Set([...indexHtml.matchAll(/\bid=["']([^"']+)["']/g)].map((match) => match[1]));
-      for (const match of indexHtml.matchAll(/\bhref=["']#([^"']+)["']/g)) {
-        expect(ids.has(match[1])).toBe(true);
+          const localPath = attr.split(/[?#]/, 1)[0];
+          const outputPath = localPath === "/" ? "index.html" : localPath.startsWith("/")
+            ? localPath.slice(1)
+            : join(dirname(page), localPath);
+          const resolvedPath = resolve(outDir, outputPath);
+          expect(existsSync(resolvedPath) && statSync(resolvedPath).isFile()).toBe(true);
+        }
       }
 
       expect(readFileSync(join(ROOT, "README.md"), "utf8")).toContain("https://losql.dev");
