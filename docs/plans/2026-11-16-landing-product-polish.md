@@ -121,9 +121,9 @@ expect(footer.querySelectorAll("nav a").map((link) => link.getAttribute("href"))
 ]);
 
 const notes = [
-  "Output from the bundled demo database.",
-  "Demo database output using a deterministic local OpenCode Provider fixture.",
-  "Output from local Provider protocol fixtures; no live Provider service was contacted.",
+  "Result from the bundled demo database.",
+  "Captured against the demo database using a deterministic local OpenCode Provider fixture.",
+  "Captured from local Provider protocol fixtures; no live Provider service was contacted.",
 ];
 for (const [index, note] of notes.entries()) {
   const paragraphs = document.getElementById(`cli-command-panel-${index}`)
@@ -277,9 +277,9 @@ Expected: FAIL because `index.html` still has 5 `[data-tabs]` groups and referen
      - Remove `data-gif` from `#omarchy-mode-panel-2` `<img>` and update its caption `<p>` to `Switch between Omarchy, Transparent mode and built-in OpenCode Themes live inside your Session.`
    - In `#cli`:
      - Replace the final provenance `<p>` in `#cli-command-panel-0`, `#cli-command-panel-1`, and `#cli-command-panel-2` with:
-       - `Output from the bundled demo database.`
-       - `Demo database output using a deterministic local OpenCode Provider fixture.`
-       - `Output from local Provider protocol fixtures; no live Provider service was contacted.`
+       - `Result from the bundled demo database.`
+       - `Captured against the demo database using a deterministic local OpenCode Provider fixture.`
+       - `Captured from local Provider protocol fixtures; no live Provider service was contacted.`
    - Replace `#footer`:
      ```html
      <footer id="footer" class="container"><a class="brand" href="#hero">&gt;_ losql</a><div class="footer-meta"><p class="footer-facts">Open Source · MIT · SQLite &amp; Postgres · Single Binary · Omarchy First · v0.2.0</p><p class="footer-copy">Made for the terminal. © 2026 losql contributors.</p></div><nav aria-label="Footer"><a href="https://github.com/DennisLoska/losql/blob/master/LICENSE">MIT License</a><a href="https://github.com/DennisLoska/losql">GitHub</a><a href="https://github.com/DennisLoska/losql/releases">Releases</a></nav></footer>

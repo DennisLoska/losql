@@ -55,9 +55,9 @@ Polish `https://losql.dev` (`landing/src/index.html`, `landing/src/site.css`, `l
 - **CLI (`#cli`):**
   - Keep all 3 tabs (`losql exec`, `losql ask`, `losql providers`), commands, copy buttons, and captured `stdout`/`stderr` blocks verbatim.
   - Streamline the secondary provenance lines into clean, truthful product notes:
-    - Panel 0 (`exec`): `<p>Output from the bundled demo database.</p>`
-    - Panel 1 (`ask`): `<p>Demo database output using a deterministic local OpenCode Provider fixture.</p>`
-    - Panel 2 (`providers`): `<p>Output from local Provider protocol fixtures; no live Provider service was contacted.</p>`
+    - Panel 0 (`exec`): `<p>Result from the bundled demo database.</p>`
+    - Panel 1 (`ask`): `<p>Captured against the demo database using a deterministic local OpenCode Provider fixture.</p>`
+    - Panel 2 (`providers`): `<p>Captured from local Provider protocol fixtures; no live Provider service was contacted.</p>`
 - **Footer (`#footer`):**
   - Contains brand `<a class="brand" href="#hero">&gt;_ losql</a>`, `<div class="footer-meta"><p class="footer-facts">Open Source · MIT · SQLite &amp; Postgres · Single Binary · Omarchy First · v0.2.0</p><p class="footer-copy">Made for the terminal. © 2026 losql contributors.</p></div>`, and `<nav aria-label="Footer"><a href="https://github.com/DennisLoska/losql/blob/master/LICENSE">MIT License</a><a href="https://github.com/DennisLoska/losql">GitHub</a><a href="https://github.com/DennisLoska/losql/releases">Releases</a></nav>`.
 - **Preserved invariants:**
