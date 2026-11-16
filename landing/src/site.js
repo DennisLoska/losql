@@ -65,6 +65,7 @@ for (const button of document.querySelectorAll('[data-copy]')) {
     try {
       await navigator.clipboard.writeText(code.textContent);
       button.textContent = 'Copied!';
+      button.dataset.copied = 'true';
       status.textContent = 'Command copied to clipboard.';
     } catch {
       const selection = window.getSelection();
@@ -75,7 +76,10 @@ for (const button of document.querySelectorAll('[data-copy]')) {
       button.textContent = 'Select & copy';
       status.textContent = 'Clipboard unavailable. Command selected; use your system copy shortcut.';
     }
-    window.setTimeout(() => { button.textContent = 'Copy'; }, 2500);
+    window.setTimeout(() => {
+      button.textContent = 'Copy';
+      delete button.dataset.copied;
+    }, 2500);
   });
 }
 

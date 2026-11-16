@@ -8,6 +8,97 @@ const ROOT = join(import.meta.dir, "..", "..");
 const BUILD_SCRIPT = join(ROOT, "landing", "build.mjs");
 
 describe("landing/build.mjs and page content", () => {
+  test("built page runs interactive site.js behavior in headless Chromium", async () => {
+    const chromium = ["chromium", "chromium-browser", "google-chrome", "google-chrome-stable"]
+      .map((binary) => spawnSync("which", [binary], { encoding: "utf8" }).stdout.trim())
+      .find(Boolean);
+    if (!chromium) return;
+
+    const outDir = mkdtempSync(join(tmpdir(), "losql-landing-smoke-"));
+    try {
+      const build = spawnSync("node", [BUILD_SCRIPT], {
+        cwd: ROOT,
+        env: { ...process.env, LANDING_OUT: outDir },
+        encoding: "utf8",
+      });
+      expect(build.status).toBe(0);
+
+      const indexPath = join(outDir, "index.html");
+      // A file URL treats root-relative paths as filesystem-root paths. Rewrite only the
+      // temporary build copy so the real built assets remain resolvable under file://.
+      let html = readFileSync(indexPath, "utf8").replace(/([="'])\/(?!\/)/g, "$1");
+      const probe = String.raw`<script>
+Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async (text) => { window.__copied = text; } } });
+window.addEventListener('load', async () => {
+  const result = {};
+  const groups = [...document.querySelectorAll('[data-tabs]')];
+  const required = ['Recorded workflows', 'Product tour stops', 'Omarchy and Theme previews', 'Headless commands'];
+  result.tabGroups = required.map((label) => {
+    const group = groups.find((item) => item.querySelector('[role="tablist"]').getAttribute('aria-label') === label);
+    if (!group) return { label, missing: true };
+    const tabs = [...group.querySelectorAll('[role="tab"]')];
+    const check = (index) => ({ selected: tabs.filter((tab) => tab.getAttribute('aria-selected') === 'true').length === 1 && tabs[index].getAttribute('aria-selected') === 'true', tabIndex: tabs[index].tabIndex === 0 && tabs.every((tab, i) => i === index || tab.tabIndex === -1), panels: tabs.every((tab, i) => document.getElementById(tab.getAttribute('aria-controls')).hidden === (i !== index)) });
+    const event = (index, key) => { tabs[index].dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true })); const target = key === 'End' ? tabs.length - 1 : key === 'Home' ? 0 : key === 'ArrowRight' ? (index + 1) % tabs.length : (index - 1 + tabs.length) % tabs.length; return check(target); };
+    return { label, right: event(0, 'ArrowRight'), left: event(1, 'ArrowLeft'), home: event(1, 'Home'), end: event(0, 'End') };
+  });
+  const heroTabs = [...document.querySelectorAll('[role="tab"]')].filter((tab) => tab.id.startsWith('hero-mode-tab-'));
+  heroTabs[1].click();
+  result.heroLive = { src: document.querySelector('#hero-mode-panel-1 img').getAttribute('src'), selected: heroTabs[1].getAttribute('aria-selected') };
+  heroTabs[0].click();
+  result.heroStatic = { src: document.querySelector('#hero-mode-panel-0 img').getAttribute('src'), selected: heroTabs[0].getAttribute('aria-selected') };
+  document.querySelector('.motion-toggle').click();
+  document.querySelector('.motion-toggle').click();
+  document.querySelector('[data-format="gif"]').click();
+  result.format = { selected: document.querySelector('[data-format="gif"]').getAttribute('aria-pressed'), gifs: [...document.querySelectorAll('img[data-static]')].filter((img) => img.getAttribute('src').endsWith('.gif')).length };
+  const copyButton = document.querySelector('[data-copy]');
+  const command = document.getElementById(copyButton.dataset.copy).textContent;
+  copyButton.click();
+  await Promise.resolve();
+  await Promise.resolve();
+  result.copy = { copied: window.__copied, command, copiedState: copyButton.dataset.copied };
+  const trigger = document.querySelector('.zoomable');
+  const selectedImage = trigger.querySelector('img');
+  trigger.click();
+  const dialog = document.getElementById('lightbox');
+  result.lightboxOpen = { open: dialog.open, src: dialog.querySelector('img').getAttribute('src'), selected: selectedImage.getAttribute('src') };
+  dialog.requestClose(); // the browser's native Escape close request for a modal dialog
+  result.lightboxClosed = !dialog.open;
+  document.title = 'SMOKE:' + btoa(JSON.stringify(result));
+});
+</script>`;
+      html = html.replace("</body>", `${probe}</body>`);
+      require("node:fs").writeFileSync(indexPath, html);
+
+      const run = spawnSync(chromium, [
+        "--headless=new", "--no-sandbox", "--disable-gpu", `--user-data-dir=${join(outDir, "profile")}`,
+        "--virtual-time-budget=3000", "--dump-dom", `file://${indexPath}`,
+      ], { encoding: "utf8", timeout: 30_000 });
+      expect(run.status).toBe(0);
+      const encoded = run.stdout.match(/<title>SMOKE:([^<]+)<\/title>/)?.[1];
+      expect(encoded).toBeDefined();
+      const result = JSON.parse(Buffer.from(encoded!, "base64").toString("utf8"));
+
+      expect(result.tabGroups).toHaveLength(4);
+      for (const group of result.tabGroups) {
+        expect(group.missing).toBeUndefined();
+        for (const key of ["right", "left", "home", "end"]) {
+          expect(group[key]).toEqual({ selected: true, tabIndex: true, panels: true });
+        }
+      }
+      expect(result.heroLive).toEqual({ src: "media/workflow-tour.webp", selected: "true" });
+      expect(result.heroStatic).toEqual({ src: "media/hero.webp", selected: "true" });
+      expect(result.format.selected).toBe("true");
+      expect(result.format.gifs).toBeGreaterThan(0);
+      expect(result.copy.copied).toBe(result.copy.command);
+      expect(result.copy.copiedState).toBe("true");
+      expect(result.lightboxOpen.open).toBe(true);
+      expect(result.lightboxOpen.src).toEndWith(`/${result.lightboxOpen.selected}`);
+      expect(result.lightboxClosed).toBe(true);
+    } finally {
+      rmSync(outDir, { recursive: true, force: true });
+    }
+  });
+
   test("CLI panels render captured binary stdout and stderr", () => {
     const outDir = mkdtempSync(join(tmpdir(), "losql-cli-output-"));
     try {
