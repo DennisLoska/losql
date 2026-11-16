@@ -158,6 +158,24 @@ function createPageDOM(html: string) {
 }
 
 describe("landing/build.mjs and page content", () => {
+  test("supporting text uses the desktop and mobile type scale", () => {
+    const css = readFileSync(join(ROOT, "landing/src/site.css"), "utf8");
+    const [desktop, mobile] = css.split("@media (max-width: 700px) {");
+    expect(mobile).toBeDefined();
+    for (const selector of [
+      ".media-note", ".media-controls > span", ".footer-facts", ".footer-copy",
+      "footer nav", ".install-grid p", ".credits-grid p",
+    ]) {
+      for (const [scope, size] of [[desktop!, "14px"], [mobile!, "13px"]]) {
+        const sizes = [...scope!.matchAll(/([^{}]+)\{([^{}]*)\}/g)]
+          .filter((rule) => rule[1]!.split(",").some((part) => part.trim() === selector))
+          .flatMap((rule) => [...rule[2]!.matchAll(/(?:^|;)\s*font(?:-size)?\s*:\s*(\d+px)/g)])
+          .map((declaration) => declaration[1]);
+        expect(sizes.at(-1)).toBe(size);
+      }
+    }
+  });
+
   test("built page runs interactive site.js behavior in a deterministic DOM", async () => {
     const outDir = mkdtempSync(join(tmpdir(), "losql-landing-smoke-"));
     try {
@@ -171,7 +189,18 @@ describe("landing/build.mjs and page content", () => {
       const { document } = page;
       const copied: string[] = [];
       const timers: { callback: () => void; delay: number }[] = [];
-      const motionPreference = { matches: false, addEventListener() {} };
+      const motionListeners: ((event: { matches: boolean }) => void)[] = [];
+      const motionPreference = {
+        matches: false,
+        addEventListener(type: string, listener: (event: { matches: boolean }) => void) {
+          expect(type).toBe("change");
+          motionListeners.push(listener);
+        },
+      };
+      const changeMotionPreference = (matches: boolean) => {
+        motionPreference.matches = matches;
+        for (const listener of motionListeners) listener({ matches });
+      };
       runInNewContext(readFileSync(join(outDir, "assets/site.js"), "utf8"), {
         document,
         navigator: { clipboard: { async writeText(text: string) { copied.push(text); } } },
@@ -182,12 +211,21 @@ describe("landing/build.mjs and page content", () => {
       }, { filename: "built/assets/site.js", timeout: 1000 });
 
       const groups = document.querySelectorAll("[data-tabs]");
-      const required = ["Recorded workflows", "Product tour stops", "Omarchy and Theme previews", "Headless commands"];
-      for (const label of required) {
-        const group = groups.find((item) => item.querySelector('[role="tablist"]').getAttribute("aria-label") === label);
+      expect(groups).toHaveLength(4);
+      const required = [
+        ["Recorded workflows", 3],
+        ["Product tour stops", 9],
+        ["Omarchy and Theme previews", 4],
+        ["Headless commands", 3],
+      ] as const;
+
+      for (const [label, count] of required) {
+        const group = groups.find(
+          (item) => item.querySelector('[role="tablist"]').getAttribute("aria-label") === label,
+        );
         expect(group).toBeDefined();
         const tabs = group!.querySelectorAll('[role="tab"]');
-        expect(tabs.length).toBeGreaterThan(1);
+        expect(tabs).toHaveLength(count);
         const check = (selected: number) => {
           for (const [index, tab] of tabs.entries()) {
             expect(tab.getAttribute("aria-selected")).toBe(String(index === selected));
@@ -217,57 +255,108 @@ describe("landing/build.mjs and page content", () => {
         expect(page.activeElement).toBe(tabs[0]!);
       }
 
-      const staticTab = document.getElementById("hero-mode-tab-0");
-      const liveTab = document.getElementById("hero-mode-tab-1");
-      const staticImage = document.querySelector("#hero-mode-panel-0 img");
-      const liveImage = document.querySelector("#hero-mode-panel-1 img");
-      const gifImage = document.querySelector("#hero-mode-panel-2 img");
-      liveTab.click();
-      expect(liveTab.getAttribute("aria-selected")).toBe("true");
-      expect(staticTab.getAttribute("aria-selected")).toBe("false");
-      expect(document.getElementById("hero-mode-panel-1").hidden).toBe(false);
-      expect(document.getElementById("hero-mode-panel-0").hidden).toBe(true);
-      expect(liveImage.getAttribute("src")).toBe("/media/workflow-tour.webp");
-      expect(gifImage.getAttribute("src")).toBe("/media/workflow-tour.gif");
-      staticTab.click();
-      expect(staticTab.getAttribute("aria-selected")).toBe("true");
-      expect(liveTab.getAttribute("aria-selected")).toBe("false");
-      expect(document.getElementById("hero-mode-panel-0").hidden).toBe(false);
-      expect(document.getElementById("hero-mode-panel-1").hidden).toBe(true);
-      expect(staticImage.getAttribute("src")).toBe("/media/hero.webp");
+      const hero = document.getElementById("hero");
+      expect(hero.querySelectorAll('[role="tablist"]')).toHaveLength(0);
+      expect(hero.querySelectorAll("[data-tabs]")).toHaveLength(0);
+      expect(hero.querySelectorAll(".zoomable")).toHaveLength(1);
+      expect(hero.querySelectorAll("img")).toHaveLength(1);
+      const heroImage = hero.querySelector(".zoomable img");
+      expect(heroImage.getAttribute("src")).toBe("/media/hero.webp");
+      expect(heroImage.getAttribute("loading")).toBe("eager");
+      expect(heroImage.getAttribute("fetchpriority")).toBe("high");
+      expect(heroImage.getAttribute("decoding")).toBe("async");
+      expect(heroImage.getAttribute("width")).toBe("1480");
+      expect(heroImage.getAttribute("height")).toBe("980");
+      expect(hero.querySelector("h1").textContent).toBe(
+        "Write the query yourself, or ask for it.",
+      );
+      expect(hero.querySelector(".window-bar").textContent).toContain("losql workspace");
+      expect(hero.querySelector(".media-note").textContent).toBe(
+        "Schema, Editor, Results and Agent in one terminal workspace. Click any capture to enlarge.",
+      );
+      expect(hero.querySelectorAll(".actions a").map((link) => link.getAttribute("href"))).toEqual([
+        "#quickstart",
+        "#tour",
+      ]);
+
+      for (const selector of [
+        "[data-format]",
+        "[data-gif]",
+        "[data-fixed-animation]",
+        ".format-switch",
+        ".workflow-cards",
+        ".pill-badge",
+        ".status-dot",
+        "#navbar nav",
+      ]) {
+        expect(document.querySelectorAll(selector)).toHaveLength(0);
+      }
+
+      const header = document.getElementById("navbar");
+      expect(header.querySelector(".brand").getAttribute("href")).toBe("#hero");
+      expect(header.querySelectorAll(".header-actions a").map((link) => link.getAttribute("href"))).toEqual([
+        "https://github.com/DennisLoska/losql",
+        "#quickstart",
+      ]);
+      expect(header.querySelectorAll("a")).toHaveLength(3);
+
+      const footer = document.getElementById("footer");
+      expect(footer.querySelector(".footer-facts").textContent).toBe(
+        "Open Source · MIT · SQLite & Postgres · Single Binary · Omarchy First · v0.2.0",
+      );
+      expect(footer.querySelector(".footer-copy").textContent).toBe(
+        "Made for the terminal. © 2026 losql contributors.",
+      );
+      expect(footer.querySelectorAll("nav a").map((link) => link.getAttribute("href"))).toEqual([
+        "https://github.com/DennisLoska/losql/blob/master/LICENSE",
+        "https://github.com/DennisLoska/losql",
+        "https://github.com/DennisLoska/losql/releases",
+      ]);
+
+      const notes = [
+        "Result from the bundled demo database.",
+        "Captured against the demo database using a deterministic local OpenCode Provider fixture.",
+        "Captured from local Provider protocol fixtures; no live Provider service was contacted.",
+      ];
+      for (const [index, note] of notes.entries()) {
+        const paragraphs = document.getElementById(`cli-command-panel-${index}`)
+          .querySelectorAll(".caption p");
+        expect(paragraphs.at(-1)!.textContent).toBe(note);
+      }
+      expect(
+        document.getElementById("omarchy-mode-panel-2").querySelector(".caption p").textContent,
+      ).toBe(
+        "Switch between Omarchy, Transparent mode and built-in OpenCode Themes live inside your Session.",
+      );
 
       const motion = document.querySelector(".motion-toggle");
       const recordings = document.querySelectorAll("img[data-static]");
-      expect(recordings.length).toBeGreaterThan(0);
-      expect(motion.getAttribute("aria-pressed")).toBe("true");
-      motion.click();
-      expect(motion.getAttribute("aria-pressed")).toBe("false");
-      for (const image of recordings) {
-        const source = image.dataset.static;
-        if (source === undefined) throw new Error("Recording is missing data-static");
-        expect(image.getAttribute("src")).toBe(source);
-      }
-      motion.click();
-      expect(motion.getAttribute("aria-pressed")).toBe("true");
-      for (const image of recordings) {
-        const source = image.dataset.fixedAnimation || image.dataset.webp;
-        if (source === undefined) throw new Error("Recording is missing its animation source");
-        expect(image.getAttribute("src")).toBe(source);
-      }
+      expect(recordings).toHaveLength(4);
+      expect(document.querySelectorAll("#workflows img[data-static]")).toHaveLength(3);
+      expect(document.querySelectorAll("#omarchy-mode-panel-2 img[data-static]")).toHaveLength(1);
+      expect(motionListeners).toHaveLength(1);
 
-      const gif = document.querySelector('[data-format="gif"]');
-      const webp = document.querySelector('[data-format="webp"]');
-      for (const [format, selected, other] of [["gif", gif, webp], ["webp", webp, gif]] as const) {
-        selected.click();
-        expect(selected.getAttribute("aria-pressed")).toBe("true");
-        expect(other.getAttribute("aria-pressed")).toBe("false");
+      const checkRecordings = (playing: boolean) => {
+        expect(motion.getAttribute("aria-pressed")).toBe(String(playing));
+        expect(motion.textContent).toBe(playing ? "Pause recordings" : "Play recordings");
         for (const image of recordings) {
-          const source = image.dataset.fixedAnimation || image.dataset[format];
-          if (source === undefined) throw new Error(`Recording is missing its ${format} source`);
+          const source = playing ? image.dataset.webp : image.dataset.static;
+          if (source === undefined) throw new Error("Recording source is missing");
           expect(image.getAttribute("src")).toBe(source);
-          if (!image.dataset.fixedAnimation) expect(image.getAttribute("src")).toEndWith(`.${format}`);
+          expect(image.dataset.webp).toEndWith(".webp");
         }
-      }
+      };
+
+      checkRecordings(true);
+      motion.click();
+      checkRecordings(false);
+      motion.click();
+      checkRecordings(true);
+      changeMotionPreference(true);
+      checkRecordings(false);
+      changeMotionPreference(false);
+      checkRecordings(true);
+      expect(heroImage.getAttribute("src")).toBe("/media/hero.webp");
 
       const copy = document.querySelector("[data-copy]");
       const command = document.getElementById(copy.dataset.copy!).textContent;
@@ -297,6 +386,74 @@ describe("landing/build.mjs and page content", () => {
         close();
         expect(dialog.open).toBe(false);
         expect(enlarged.getAttribute("src")).toBeNull();
+      }
+
+      const recordingTrigger = document.querySelector("#workflow-panel-0 .zoomable");
+      const recordingImage = recordingTrigger.querySelector("img");
+      const recordingStatic = recordingImage.dataset.static;
+      const recordingWebp = recordingImage.dataset.webp;
+      if (recordingStatic === undefined || recordingWebp === undefined) {
+        throw new Error("Recording sources are missing");
+      }
+      recordingTrigger.click();
+      expect(dialog.open).toBe(true);
+      expect(enlarged.src).toBe(recordingImage.src);
+      expect(enlarged.dataset.static).toBe(recordingStatic);
+      expect(enlarged.dataset.webp).toBe(recordingWebp);
+
+      motion.click();
+      checkRecordings(false);
+      expect(enlarged.getAttribute("src")).toBe(recordingStatic);
+      motion.click();
+      checkRecordings(true);
+      expect(enlarged.getAttribute("src")).toBe(recordingWebp);
+
+      changeMotionPreference(true);
+      checkRecordings(false);
+      expect(enlarged.getAttribute("src")).toBe(recordingStatic);
+      changeMotionPreference(false);
+      checkRecordings(true);
+      expect(enlarged.getAttribute("src")).toBe(recordingWebp);
+
+      document.querySelector("#hero .zoomable").click();
+      expect(dialog.open).toBe(true);
+      expect(Object.keys(enlarged.dataset)).toEqual([]);
+      expect(enlarged.src).toBe(heroImage.src);
+      expect(enlarged.alt).toBe(heroImage.alt);
+      motion.click();
+      checkRecordings(false);
+      expect(enlarged.src).toBe(heroImage.src);
+      changeMotionPreference(false);
+      checkRecordings(true);
+      expect(enlarged.src).toBe(heroImage.src);
+      dialog.close();
+      expect(enlarged.getAttribute("src")).toBeNull();
+      expect(Object.keys(enlarged.dataset)).toEqual([]);
+
+      const reducedPage = createPageDOM(readFileSync(join(outDir, "index.html"), "utf8"));
+      runInNewContext(readFileSync(join(outDir, "assets/site.js"), "utf8"), {
+        document: reducedPage.document,
+        navigator: { clipboard: { async writeText() {} } },
+        window: {
+          matchMedia: () => ({ matches: true, addEventListener() {} }),
+          setTimeout() { return 0; },
+        },
+      }, { filename: "built/assets/site.js", timeout: 1000 });
+
+      const reducedMotion = reducedPage.document.querySelector(".motion-toggle");
+      expect(reducedMotion.getAttribute("aria-pressed")).toBe("false");
+      expect(reducedMotion.textContent).toBe("Play recordings");
+      for (const image of reducedPage.document.querySelectorAll("img[data-static]")) {
+        const source = image.dataset.static;
+        if (source === undefined) throw new Error("Recording source is missing");
+        expect(image.getAttribute("src")).toBe(source);
+      }
+      reducedMotion.click();
+      expect(reducedMotion.getAttribute("aria-pressed")).toBe("true");
+      for (const image of reducedPage.document.querySelectorAll("img[data-static]")) {
+        const source = image.dataset.webp;
+        if (source === undefined) throw new Error("Recording source is missing");
+        expect(image.getAttribute("src")).toBe(source);
       }
     } finally {
       rmSync(outDir, { recursive: true, force: true });
@@ -403,6 +560,7 @@ describe("landing/build.mjs and page content", () => {
       expect(indexHtml).toContain("Proposal");
       expect(indexHtml).toContain("Provider");
       expect(indexHtml).toContain("Transparent");
+      expect(indexHtml).not.toMatch(/\boutput\b/i);
 
       // Required inspirations & credits links
       expect(indexHtml).toContain("https://neovim.io");
@@ -420,7 +578,7 @@ describe("landing/build.mjs and page content", () => {
       expect(indexHtml).toContain("omarchy-transparent.webp");
       expect(indexHtml).toContain(":set transparent");
 
-      // All 9 Tour stops & 3 Animated recordings
+      // All nine tour stops and three WebP recording assets remain represented.
       for (const media of [
         "hero.webp",
         "editor.webp",
@@ -432,14 +590,15 @@ describe("landing/build.mjs and page content", () => {
         "themes.webp",
         "menu.webp",
         "recording-vim.webp",
-        "recording-vim.gif",
         "recording-agent.webp",
-        "recording-agent.gif",
         "recording-omarchy.webp",
-        "recording-omarchy.gif",
       ]) {
         expect(indexHtml).toContain(media);
       }
+      expect(indexHtml).not.toContain(".gif");
+      expect(indexHtml).toContain(
+        "Open Source · MIT · SQLite &amp; Postgres · Single Binary · Omarchy First · v0.2.0",
+      );
 
       // Strict negative guards: no fake content, no fork/steal encouragement, no star counters, no external Google Fonts
       expect(indexHtml.toLowerCase()).not.toContain("steal our code");
