@@ -106,7 +106,20 @@ try {
   const revenue = `select c.name, c.country,\n       round(sum(i.quantity * i.unit_price), 2)\n         as revenue\nfrom customers c\njoin orders o on o.customer_id = c.id\njoin order_items i on i.order_id = o.id\ngroup by c.id\norder by revenue desc;`;
   // These executables never connect to a provider. OpenCode's actual stream
   // envelope wraps protocol actions consumed by the application's real loop.
-  const fixture = `#!${process.execPath}\nconst args = process.argv.slice(2);\nif(args.includes('--version')) { console.log('1.0.0 capture-fixture'); process.exit(0); }\nif(args[0] === 'models') { console.log('default'); process.exit(0); }\nconst prompt = await Bun.stdin.text();\nconst step = prompt.includes('<result>');\nawait Bun.sleep(step ? 1600 : 1000);\nconst action = step ? {action:'answer',message:'Revenue by customer, verified against the demo database. Ada leads with multiple orders. Review the SQL before running.',sql:${JSON.stringify(revenue)}} : {action:'query',sql:'select c.name, count(o.id) as orders from customers c join orders o on o.customer_id = c.id group by c.id',why:'Check customer orders before proposing revenue SQL'};\nconsole.log(JSON.stringify({type:'text',part:{text:JSON.stringify(action)}}));\n`;
+  const fixture = `#!${process.execPath}
+const args = process.argv.slice(2);
+if(args.includes('--version')) { console.log('1.0.0 capture-fixture'); process.exit(0); }
+if(args[0] === 'models') { console.log('default'); process.exit(0); }
+const prompt = await Bun.stdin.text();
+const completed = (prompt.match(/<result>/g) ?? []).length;
+await Bun.sleep(completed ? 1600 : 1000);
+const actions = [
+  {action:'describe',relations:['customers','orders','order_items']},
+  {action:'query',sql:'select c.name, count(o.id) as orders from customers c join orders o on o.customer_id = c.id group by c.id',why:'Check customer orders before proposing revenue SQL'},
+  {action:'answer',message:'Revenue by customer, verified against the demo database. Ada leads with multiple orders. Review the SQL before running.',sql:${JSON.stringify(revenue)}}
+];
+console.log(JSON.stringify({type:'text',part:{text:JSON.stringify(actions[Math.min(completed, actions.length - 1)])}}));
+`;
   for (const name of ["claude", "codex", "opencode", "antigravity"]) {
     await writeFile(join(work, "bin", name), fixture); await chmod(join(work, "bin", name), 0o755);
   }
@@ -134,7 +147,8 @@ try {
   await keys("Space", "a", "a"); await capture("agent-open", "AGENT");
   await text("Show revenue by customer");
   await capture("agent-question", "Show revenue"); await keys("Enter");
-  await waitFor("query"); await capture("agent-step", "query");
+  await capture("agent-describe", "describe");
+  await capture("agent-step", "query");
   await waitFor("Revenue by customer"); await keys("Escape");
   await capture("agent", "enter accept");
   await focus("h"); await capture("hero", "8 rows");
@@ -188,7 +202,7 @@ pre{margin:0;padding:16px;font:16px/21px mono;font-variant-ligatures:none;white-
   const sequences: Record<string, string[]> = {
     "workflow-tour": ["hero", "editor", "json", "agent", "themes", "omarchy"],
     "recording-vim": ["hero", "editor", "agent-run", "json", "record", "zoom"],
-    "recording-agent": ["agent-open", "agent-question", "agent-step", "agent", "agent-accepted", "agent-run"],
+    "recording-agent": ["agent-open", "agent-question", "agent-describe", "agent-step", "agent", "agent-accepted", "agent-run"],
     "recording-omarchy": ["themes", "omarchy", "omarchy-transparent", "catppuccin", "nord", "tokyonight"],
   };
   for (const [name, frames] of Object.entries(sequences)) {

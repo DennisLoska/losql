@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
+import { parseAction } from "../../src/core/agent/protocol";
 
 const ROOT = join(import.meta.dir, "..", "..");
 const MEDIA_DIR = join(ROOT, "landing", "public", "media");
@@ -42,6 +43,29 @@ const REQUIRED_FONTS = [
 ];
 
 describe("landing media and fonts", () => {
+  test("capture provider describes relations, queries, then answers", async () => {
+    const source = readFileSync(join(ROOT, "landing/scripts/capture-media.ts"), "utf8");
+    const template = source.match(/const fixture = (`[^]*?`);\n/)!;
+    const fixture = new Function("process", "revenue", `return ${template[1]}`)(process, "select 1;");
+    let prompt = 'Available actions: {"action":"describe"}, {"action":"query"}, {"action":"answer"}\nuser: Show revenue by customer';
+    for (const expected of ["describe", "query", "answer"]) {
+      const child = Bun.spawn([process.execPath, "-e", fixture.replace(/^#![^\n]*\n/, "")], {
+        stdin: new Blob([prompt]), stdout: "pipe", stderr: "pipe",
+      });
+      const output = await new Response(child.stdout).text();
+      expect(await child.exited).toBe(0);
+      const reply = JSON.parse(output).part.text;
+      const parsed = parseAction(reply);
+      expect(parsed.ok).toBe(true);
+      if (!parsed.ok) throw new Error(parsed.reason);
+      expect(parsed.action.action).toBe(expected);
+      if (parsed.action.action === "describe") {
+        expect(parsed.action.relations).toEqual(["customers", "orders", "order_items"]);
+      }
+      prompt += `\nagent: ${reply}\n<result>Completed ${expected}</result>`;
+    }
+  }, 10000);
+
   test("self-hosted WOFF2 fonts and OFL licenses exist", () => {
     for (const file of REQUIRED_FONTS) {
       const full = join(FONTS_DIR, file);
