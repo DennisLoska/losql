@@ -48,7 +48,10 @@ nav { display: flex; gap: 20px; align-items: center; }
 .hero { padding-top: 82px; padding-bottom: 70px; text-align: center; }
 .hero h1 { max-width: 900px; margin: 0 auto 24px; animation: fadeUp .65s both; }
 .hero-subtitle { max-width: 660px; font-size: 18px; line-height: 1.8; margin: auto; animation: fadeUp .65s .08s both; }
-.actions { display: flex; align-items: center; justify-content: center; gap: 14px; margin: 30px 0 48px; }
+.hero-install { max-width: 720px; margin: 28px auto 0; animation: fadeUp .65s .11s both; }
+.hero-install .command { margin-block: 0; padding: 14px 18px; align-items: center; border-color: var(--border-strong); background: rgba(8,8,8,.92); text-align: left; }
+.hero-install .prompt { font: 600 13px var(--font-mono); color: var(--accent); user-select: none; }
+.actions { display: flex; align-items: center; justify-content: center; gap: 14px; margin: 24px 0 48px; }
 .text-link { font-size: 12px; color: var(--fg-muted); border-bottom: 1px solid var(--border-strong); padding-block: 4px; }
 .showcase-window { background: var(--bg-card); border: 1px solid rgba(255,255,255,.12); border-radius: .875rem; box-shadow: 0 24px 80px rgba(0,0,0,.85), 0 0 0 1px rgba(255,255,255,.025); overflow: hidden; }
 .hero-window { animation: fadeUp .8s .15s both; text-align: left; }

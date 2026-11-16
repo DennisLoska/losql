@@ -278,6 +278,20 @@ describe("landing/build.mjs and page content", () => {
         "#quickstart",
         "#tour",
       ]);
+      const heroInstall = hero.querySelector(".hero-install");
+      expect(heroInstall.querySelector("#hero-install-command").textContent).toBe(
+        "curl -fsSL https://raw.githubusercontent.com/DennisLoska/losql/v0.2.0/install.sh | sh",
+      );
+      expect(
+        heroInstall.querySelector('[data-copy="hero-install-command"]').getAttribute("aria-label"),
+      ).toBe("Copy install command");
+      const heroDirectChildren = hero.children.filter(
+        (child): child is typeof hero => typeof child !== "string",
+      );
+      const installIndex = heroDirectChildren.findIndex((el) => el.matches(".hero-install"));
+      const windowIndex = heroDirectChildren.findIndex((el) => el.matches(".hero-window"));
+      expect(installIndex).toBeGreaterThan(-1);
+      expect(installIndex).toBeLessThan(windowIndex);
 
       for (const selector of [
         "[data-format]",
@@ -360,7 +374,9 @@ describe("landing/build.mjs and page content", () => {
 
       const copy = document.querySelector("[data-copy]");
       const command = document.getElementById(copy.dataset.copy!).textContent;
-      expect(command).toBe('losql exec -c demo "select count(*) from orders"');
+      expect(command).toBe(
+        "curl -fsSL https://raw.githubusercontent.com/DennisLoska/losql/v0.2.0/install.sh | sh",
+      );
       copy.click();
       await Promise.resolve();
       expect(copied).toEqual([command]);
@@ -371,6 +387,11 @@ describe("landing/build.mjs and page content", () => {
       timers[0]!.callback();
       expect(copy.dataset.copied).toBeUndefined();
       expect(copy.textContent).toBe("Copy");
+
+      const execCopy = document.querySelector('[data-copy="exec-command"]');
+      expect(document.getElementById(execCopy.dataset.copy!).textContent).toBe(
+        'losql exec -c demo "select count(*) from orders"',
+      );
 
       const dialog = document.getElementById("lightbox");
       const enlarged = document.querySelector("#lightbox img");
