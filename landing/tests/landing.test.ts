@@ -174,6 +174,10 @@ describe("landing/build.mjs and page content", () => {
         expect(sizes.at(-1)).toBe(size);
       }
     }
+    expect(desktop).toMatch(/\.hero-install\s*\{[^}]*width:\s*fit-content/);
+    expect(desktop).toMatch(/\.hero-install\s+\.command\s*\{[^}]*display:\s*inline-flex/);
+    expect(desktop).toMatch(/\.command\s+pre\s*\{[^}]*scrollbar-width:\s*none/);
+    expect(desktop).toMatch(/\.credits-grid\s+article:last-child\s*\{[^}]*grid-column:\s*span\s+2/);
   });
 
   test("built page runs interactive site.js behavior in a deterministic DOM", async () => {
