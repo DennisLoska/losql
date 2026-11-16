@@ -494,4 +494,71 @@ describe("landing/build.mjs and page content", () => {
       rmSync(outDir, { recursive: true, force: true });
     }
   });
+
+  test("built site includes comprehensive SEO metadata, JSON-LD structured data, image sitemap, llms.txt, and webmanifest", () => {
+    const outDir = mkdtempSync(join(tmpdir(), "losql-landing-seo-"));
+    try {
+      const build = spawnSync("node", [BUILD_SCRIPT], {
+        cwd: ROOT,
+        env: { ...process.env, LANDING_OUT: outDir },
+        encoding: "utf8",
+      });
+      expect(build.status).toBe(0);
+
+      const indexHtml = readFileSync(join(outDir, "index.html"), "utf8");
+      expect(indexHtml).toContain('<meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1">');
+      expect(indexHtml).toContain('<meta name="color-scheme" content="dark">');
+      expect(indexHtml).toContain('<meta name="application-name" content="losql">');
+      expect(indexHtml).toContain('<link rel="canonical" href="https://losql.dev/">');
+      expect(indexHtml).toContain('<link rel="manifest" href="/site.webmanifest">');
+      expect(indexHtml).toContain('<link rel="preload" href="/fonts/JetBrainsMono-latin.woff2" as="font" type="font/woff2" crossorigin>');
+      expect(indexHtml).toContain('<link rel="preload" href="/media/hero.webp" as="image" type="image/webp" fetchpriority="high">');
+
+      // Open Graph & Twitter Cards
+      expect(indexHtml).toContain('<meta property="og:site_name" content="losql">');
+      expect(indexHtml).toContain('<meta property="og:locale" content="en_US">');
+      expect(indexHtml).toContain('<meta property="og:image:width" content="1480">');
+      expect(indexHtml).toContain('<meta property="og:image:height" content="980">');
+      expect(indexHtml).toContain('<meta property="og:image:alt"');
+      expect(indexHtml).toContain('<meta name="twitter:card" content="summary_large_image">');
+      expect(indexHtml).toContain('<meta name="twitter:title"');
+      expect(indexHtml).toContain('<meta name="twitter:description"');
+      expect(indexHtml).toContain('<meta name="twitter:image" content="https://losql.dev/media/hero.webp">');
+      expect(indexHtml).toContain('<meta name="twitter:image:alt"');
+
+      // JSON-LD Structured Data
+      const jsonLdMatch = indexHtml.match(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/);
+      expect(jsonLdMatch?.[1]).toBeDefined();
+      const structuredData = JSON.parse(jsonLdMatch![1]!) as {
+        "@context": string;
+        "@graph": Array<Record<string, unknown>>;
+      };
+      expect(structuredData["@context"]).toBe("https://schema.org");
+      const appNode = structuredData["@graph"].find((node) => node["@type"] === "SoftwareApplication");
+      const siteNode = structuredData["@graph"].find((node) => node["@type"] === "WebSite");
+      expect(appNode).toBeDefined();
+      expect(appNode?.["name"]).toBe("losql");
+      expect(appNode?.["applicationCategory"]).toBe("DeveloperApplication");
+      expect(appNode?.["codeRepository"]).toBe("https://github.com/DennisLoska/losql");
+      expect(siteNode).toBeDefined();
+      expect(siteNode?.["url"]).toBe("https://losql.dev/");
+
+      // Sitemap, llms.txt & site.webmanifest
+      const sitemap = readFileSync(join(outDir, "sitemap.xml"), "utf8");
+      expect(sitemap).toContain("http://www.google.com/schemas/sitemap-image/1.1");
+      expect(sitemap).toContain("<image:loc>https://losql.dev/media/hero.webp</image:loc>");
+
+      const llmsTxt = readFileSync(join(outDir, "llms.txt"), "utf8");
+      expect(llmsTxt).toContain("# losql");
+      expect(llmsTxt).toContain("https://losql.dev/");
+      expect(llmsTxt).toContain("https://github.com/DennisLoska/losql");
+
+      const manifest = JSON.parse(readFileSync(join(outDir, "site.webmanifest"), "utf8")) as Record<string, unknown>;
+      expect(manifest["name"]).toBe("losql");
+      expect(manifest["theme_color"]).toBe("#000000");
+    } finally {
+      rmSync(outDir, { recursive: true, force: true });
+    }
+  });
 });
+
