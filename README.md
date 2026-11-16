@@ -17,6 +17,7 @@
 </p>
 
 <p align="center">
+  <a href="https://losql.dev">losql.dev</a> •
   <a href="#tour">Tour</a> •
   <a href="#quick-start">Quick start</a> •
   <a href="#what-it-does">What it does</a> •

@@ -159,4 +159,36 @@ describe("landing/build.mjs and page content", () => {
       rmSync(outDir, { recursive: true, force: true });
     }
   });
+
+  test("built pages have valid local links and anchors, and README links to the site", () => {
+    const outDir = mkdtempSync(join(tmpdir(), "losql-landing-links-"));
+    try {
+      const build = spawnSync("node", [BUILD_SCRIPT], {
+        cwd: ROOT,
+        env: { ...process.env, LANDING_OUT: outDir },
+        encoding: "utf8",
+      });
+      expect(build.status).toBe(0);
+
+      const pages = ["index.html", "404.html"];
+      const pageContents = new Map(pages.map((page) => [page, readFileSync(join(outDir, page), "utf8")]));
+      for (const [page, html] of pageContents) {
+        for (const match of html.matchAll(/\b(?:src|href)=["'](\/[^"']*)["']/g)) {
+          const localPath = match[1].split(/[?#]/, 1)[0];
+          const outputPath = localPath === "/" ? "index.html" : localPath.slice(1);
+          expect(existsSync(join(outDir, outputPath))).toBe(true);
+        }
+      }
+
+      const indexHtml = pageContents.get("index.html");
+      const ids = new Set([...indexHtml.matchAll(/\bid=["']([^"']+)["']/g)].map((match) => match[1]));
+      for (const match of indexHtml.matchAll(/\bhref=["']#([^"']+)["']/g)) {
+        expect(ids.has(match[1])).toBe(true);
+      }
+
+      expect(readFileSync(join(ROOT, "README.md"), "utf8")).toContain("https://losql.dev");
+    } finally {
+      rmSync(outDir, { recursive: true, force: true });
+    }
+  });
 });
