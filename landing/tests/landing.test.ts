@@ -200,21 +200,21 @@ describe("landing/build.mjs and page content", () => {
         for (let index = 0; index < tabs.length; index++) {
           tabs[index]!.keydown("ArrowRight");
           check((index + 1) % tabs.length);
-          expect(page.activeElement).toBe(tabs[(index + 1) % tabs.length]);
+          expect(page.activeElement).toBe(tabs[(index + 1) % tabs.length]!);
         }
         for (let index = 0; index < tabs.length; index++) {
           const current = (tabs.length - index) % tabs.length;
           const next = (current - 1 + tabs.length) % tabs.length;
           tabs[current]!.keydown("ArrowLeft");
           check(next);
-          expect(page.activeElement).toBe(tabs[next]);
+          expect(page.activeElement).toBe(tabs[next]!);
         }
         tabs[0]!.keydown("End");
         check(tabs.length - 1);
         expect(page.activeElement).toBe(tabs.at(-1)!);
         tabs.at(-1)!.keydown("Home");
         check(0);
-        expect(page.activeElement).toBe(tabs[0]);
+        expect(page.activeElement).toBe(tabs[0]!);
       }
 
       const staticTab = document.getElementById("hero-mode-tab-0");
@@ -242,10 +242,18 @@ describe("landing/build.mjs and page content", () => {
       expect(motion.getAttribute("aria-pressed")).toBe("true");
       motion.click();
       expect(motion.getAttribute("aria-pressed")).toBe("false");
-      for (const image of recordings) expect(image.getAttribute("src")).toBe(image.dataset.static);
+      for (const image of recordings) {
+        const source = image.dataset.static;
+        if (source === undefined) throw new Error("Recording is missing data-static");
+        expect(image.getAttribute("src")).toBe(source);
+      }
       motion.click();
       expect(motion.getAttribute("aria-pressed")).toBe("true");
-      for (const image of recordings) expect(image.getAttribute("src")).toBe(image.dataset.fixedAnimation || image.dataset.webp);
+      for (const image of recordings) {
+        const source = image.dataset.fixedAnimation || image.dataset.webp;
+        if (source === undefined) throw new Error("Recording is missing its animation source");
+        expect(image.getAttribute("src")).toBe(source);
+      }
 
       const gif = document.querySelector('[data-format="gif"]');
       const webp = document.querySelector('[data-format="webp"]');
@@ -254,7 +262,9 @@ describe("landing/build.mjs and page content", () => {
         expect(selected.getAttribute("aria-pressed")).toBe("true");
         expect(other.getAttribute("aria-pressed")).toBe("false");
         for (const image of recordings) {
-          expect(image.getAttribute("src")).toBe(image.dataset.fixedAnimation || image.dataset[format]);
+          const source = image.dataset.fixedAnimation || image.dataset[format];
+          if (source === undefined) throw new Error(`Recording is missing its ${format} source`);
+          expect(image.getAttribute("src")).toBe(source);
           if (!image.dataset.fixedAnimation) expect(image.getAttribute("src")).toEndWith(`.${format}`);
         }
       }
@@ -339,6 +349,7 @@ describe("landing/build.mjs and page content", () => {
     const imports = [...buildSource.matchAll(/from\s+["']([^"']+)["']/g)].map((m) => m[1]);
     expect(imports.length).toBeGreaterThan(0);
     for (const spec of imports) {
+      if (spec === undefined) throw new Error("Import is missing its module specifier");
       expect(["node:fs", "node:path", "node:url"]).toContain(spec);
     }
 
@@ -461,6 +472,7 @@ describe("landing/build.mjs and page content", () => {
         const ids = new Set([...html.matchAll(/\bid=["']([^"']+)["']/g)].map((match) => match[1]));
         for (const match of html.matchAll(/\b(?:src|href)=["']([^"']*)["']/g)) {
           const attr = match[1];
+          if (attr === undefined) throw new Error("Link is missing its attribute value");
           if (attr.startsWith("#")) {
             expect(ids.has(attr.slice(1))).toBe(true);
             continue;
@@ -468,6 +480,7 @@ describe("landing/build.mjs and page content", () => {
           if (/^(?:https?:\/\/|mailto:|data:)/.test(attr)) continue;
 
           const localPath = attr.split(/[?#]/, 1)[0];
+          if (localPath === undefined) throw new Error(`Link has no local path: ${attr}`);
           const outputPath = localPath === "/" ? "index.html" : localPath.startsWith("/")
             ? localPath.slice(1)
             : join(dirname(page), localPath);
