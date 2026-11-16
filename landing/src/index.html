@@ -84,7 +84,7 @@
 <div role="tabpanel" id="omarchy-mode-panel-3" aria-labelledby="omarchy-mode-tab-3" tabindex="0"><button class="zoomable" type="button" aria-label="Enlarge: Live preview in the Themes dialog"><img src="/media/themes.webp" alt="Live preview in the Themes dialog" loading="lazy" width="1480" height="980"></button><div class="caption"><h3>Seven built-ins. OpenCode-format Themes.</h3><p><code>tokyonight</code>, <code>catppuccin</code>, <code>everforest</code>, <code>gruvbox</code>, <code>kanagawa</code>, <code>nord</code>, <code>rosepine</code>. Drop a compatible Theme into <code>~/.config/losql/themes/&lt;name&gt;.json</code>.</p><kbd>space t</kbd></div></div>
 </div>
 </div></section><section id="cli" class="container section"><div class="section-heading"><div><p class="eyebrow">05 / Without the interface</p><h2>The same tools.<br>In your scripts.</h2></div><p>Run Statements, ask for SQL, or check your Providers. Commands compose with your shell.</p></div>
-<!-- CLI output captured from compiled losql SHA-256 d8c8d17543a9736cf7143b80026e0a09dfafdf56c8fa4a774136bab1712ae739; provider replies use local protocol fixtures. -->
+<!-- CLI captures recorded from compiled losql SHA-256 d8c8d17543a9736cf7143b80026e0a09dfafdf56c8fa4a774136bab1712ae739; provider replies use local protocol fixtures. -->
 <div class="tab-group" data-tabs><div class="tab-strip" role="tablist" aria-label="Headless commands">
 <button type="button" role="tab" id="cli-command-tab-0" aria-controls="cli-command-panel-0" aria-selected="true" tabindex="0">losql exec</button>
 <button type="button" role="tab" id="cli-command-tab-1" aria-controls="cli-command-panel-1" aria-selected="false" tabindex="-1">losql ask</button>
@@ -94,7 +94,7 @@
 ----------
        12 
 (1 row)
-</code></pre></div><div class="caption"><h3>Run a Statement. Print a Result.</h3><p><code>exec</code> prints a Table by default. Choose <code>--format json</code> or <code>--format csv</code>, pipe SQL on stdin, or restrict a Run with <code>--read-only</code>.</p><p>Output from the bundled demo database.</p></div></div>
+</code></pre></div><div class="caption"><h3>Run a Statement. Print a Result.</h3><p><code>exec</code> prints a Table by default. Choose <code>--format json</code> or <code>--format csv</code>, pipe SQL on stdin, or restrict a Run with <code>--read-only</code>.</p><p>Result from the bundled demo database.</p></div></div>
 <div role="tabpanel" id="cli-command-panel-1" aria-labelledby="cli-command-tab-1" tabindex="0"><div class="command"><pre><code id="ask-command">losql ask -c demo --run &quot;Show revenue by customer&quot;</code></pre><button class="copy-btn" type="button" data-copy="ask-command" aria-label="Copy ask command">Copy</button></div><div class="command" role="group" aria-label="Captured stdout"><span class="eyebrow">stdout</span><pre aria-label="stdout"><code>select c.name, c.country,
        round(sum(i.quantity * i.unit_price), 2)
          as revenue
@@ -117,12 +117,12 @@ order by revenue desc;
 </code></pre></div><div class="command" role="group" aria-label="Captured stderr"><span class="eyebrow">stderr</span><pre aria-label="stderr"><code>losql: describe customers, orders, order_items
 losql: query select c.name, count(o.id) as orders from customers c join orders o on o.customer_id = c.id group by c.id
 Revenue by customer, verified against the demo database. Ada leads with multiple orders. Review the SQL before running.
-</code></pre></div><div class="caption"><h3>Ask in words. Keep the SQL.</h3><p><code>ask</code> writes the Proposal SQL to stdout; explanation and Steps go to stderr. <code>--run</code> also runs it read-only. Without that flag, you get SQL to inspect.</p><p>Demo database output using a deterministic local OpenCode Provider fixture.</p></div></div>
+</code></pre></div><div class="caption"><h3>Ask in words. Keep the SQL.</h3><p><code>ask</code> writes the Proposal SQL to stdout; explanation and Steps go to stderr. <code>--run</code> also runs it read-only. Without that flag, you get SQL to inspect.</p><p>Captured against the demo database using a deterministic local OpenCode Provider fixture.</p></div></div>
 <div role="tabpanel" id="cli-command-panel-2" aria-labelledby="cli-command-tab-2" tabindex="0"><div class="command"><pre><code id="providers-command">losql providers --test</code></pre><button class="copy-btn" type="button" data-copy="providers-command" aria-label="Copy providers command">Copy</button></div><div class="command" role="group" aria-label="Captured stdout"><span class="eyebrow">stdout</span><pre aria-label="stdout"><code>Claude Code  1.0.0  /tmp/losql-cli-uIQQHv/bin/claude  replied in 0.0s
 Codex  1.0.0  /tmp/losql-cli-uIQQHv/bin/codex  replied in 0.0s
 OpenCode  1.0.0  /tmp/losql-cli-uIQQHv/bin/opencode  replied in 0.0s
 Antigravity  1.0.0  /tmp/losql-cli-uIQQHv/bin/antigravity  replied in 0.0s
-</code></pre></div><div class="caption"><h3>Check the coding CLIs on your PATH.</h3><p>List installed Providers and versions, then send each a one-word test prompt. Each CLI must already be installed and logged in. Use <code>--json</code> for scriptable discovery.</p><p>Output from local Provider protocol fixtures; no live Provider service was contacted.</p></div></div>
+</code></pre></div><div class="caption"><h3>Check the coding CLIs on your PATH.</h3><p>List installed Providers and versions, then send each a one-word test prompt. Each CLI must already be installed and logged in. Use <code>--json</code> for scriptable discovery.</p><p>Captured from local Provider protocol fixtures; no live Provider service was contacted.</p></div></div>
 </div>
 </section><section id="quickstart" class="container section"><div class="section-heading"><div><p class="eyebrow">06 / Quick Start</p><h2>One binary.<br>Your next Connection.</h2></div><p>Build with Bun. Start with the bundled demo, a SQLite file, or a Postgres URL.</p></div><div class="install-grid"><article><span class="eyebrow">01 / Build &amp; install</span><h3>From source, with Bun</h3>
 <div class="command"><pre><code id="build-commands">git clone https://github.com/DennisLoska/losql.git

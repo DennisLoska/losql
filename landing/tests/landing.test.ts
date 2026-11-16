@@ -158,6 +158,24 @@ function createPageDOM(html: string) {
 }
 
 describe("landing/build.mjs and page content", () => {
+  test("supporting text uses the desktop and mobile type scale", () => {
+    const css = readFileSync(join(ROOT, "landing/src/site.css"), "utf8");
+    const [desktop, mobile] = css.split("@media (max-width: 700px) {");
+    expect(mobile).toBeDefined();
+    for (const selector of [
+      ".media-note", ".media-controls > span", ".footer-facts", ".footer-copy",
+      "footer nav", ".install-grid p", ".credits-grid p",
+    ]) {
+      for (const [scope, size] of [[desktop!, "14px"], [mobile!, "13px"]]) {
+        const sizes = [...scope!.matchAll(/([^{}]+)\{([^{}]*)\}/g)]
+          .filter((rule) => rule[1]!.split(",").some((part) => part.trim() === selector))
+          .flatMap((rule) => [...rule[2]!.matchAll(/(?:^|;)\s*font(?:-size)?\s*:\s*(\d+px)/g)])
+          .map((declaration) => declaration[1]);
+        expect(sizes.at(-1)).toBe(size);
+      }
+    }
+  });
+
   test("built page runs interactive site.js behavior in a deterministic DOM", async () => {
     const outDir = mkdtempSync(join(tmpdir(), "losql-landing-smoke-"));
     try {
@@ -296,9 +314,9 @@ describe("landing/build.mjs and page content", () => {
       ]);
 
       const notes = [
-        "Output from the bundled demo database.",
-        "Demo database output using a deterministic local OpenCode Provider fixture.",
-        "Output from local Provider protocol fixtures; no live Provider service was contacted.",
+        "Result from the bundled demo database.",
+        "Captured against the demo database using a deterministic local OpenCode Provider fixture.",
+        "Captured from local Provider protocol fixtures; no live Provider service was contacted.",
       ];
       for (const [index, note] of notes.entries()) {
         const paragraphs = document.getElementById(`cli-command-panel-${index}`)
@@ -542,6 +560,7 @@ describe("landing/build.mjs and page content", () => {
       expect(indexHtml).toContain("Proposal");
       expect(indexHtml).toContain("Provider");
       expect(indexHtml).toContain("Transparent");
+      expect(indexHtml).not.toMatch(/\boutput\b/i);
 
       // Required inspirations & credits links
       expect(indexHtml).toContain("https://neovim.io");
