@@ -11,6 +11,7 @@
     "typecheck": "tsc --noEmit",
     "check": "bun run typecheck && bun run test",
     "build": "bun run ./build.ts",
+    "landing:build": "node ./landing/build.mjs",
     "verify:tui": "bun run build && scripts/verify-tui.sh"
   },
   "dependencies": {

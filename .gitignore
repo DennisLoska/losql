@@ -38,3 +38,6 @@ losql
 
 # Build
 /dist
+
+# Static landing page
+landing/dist
