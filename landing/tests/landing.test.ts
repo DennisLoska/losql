@@ -12,7 +12,7 @@ describe("landing/build.mjs and page content", () => {
     const chromium = ["chromium", "chromium-browser", "google-chrome", "google-chrome-stable"]
       .map((binary) => spawnSync("which", [binary], { encoding: "utf8" }).stdout.trim())
       .find(Boolean);
-    if (!chromium) return;
+    expect(chromium).not.toBeNull();
 
     const outDir = mkdtempSync(join(tmpdir(), "losql-landing-smoke-"));
     try {
@@ -69,7 +69,7 @@ window.addEventListener('load', async () => {
       html = html.replace("</body>", `${probe}</body>`);
       require("node:fs").writeFileSync(indexPath, html);
 
-      const run = spawnSync(chromium, [
+      const run = spawnSync(chromium!, [
         "--headless=new", "--no-sandbox", "--disable-gpu", `--user-data-dir=${join(outDir, "profile")}`,
         "--virtual-time-budget=3000", "--dump-dom", `file://${indexPath}`,
       ], { encoding: "utf8", timeout: 30_000 });
