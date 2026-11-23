@@ -490,11 +490,15 @@ export async function openPostgres(
   // The tail of the exclusive queue for the side client: each holder runs alone on it, so a
   // read-only Run's transaction, its ROLLBACK and RESET ALL never interleave with other side work.
   let sideTail: Promise<void> = Promise.resolve();
+  // Slots taken on the side queue and not yet released, waiting or running; 0 means it is idle.
+  let sideOccupants = 0;
   let closingPromise: Promise<void> | null = null;
 
   const sessionClosedError = () => new QueryError("the Session is closed");
   const userCancelError = () =>
     new QueryError("canceling statement due to user request", { code: "57014" });
+  const statementTimeoutError = () =>
+    new QueryError("canceling statement due to statement timeout", { code: "57014" });
 
   /** Throws the canonical QueryError when the Session is closed or the caller gave up. */
   function checkSideCaller(signal: AbortSignal | undefined): void {
@@ -530,11 +534,7 @@ export async function openPostgres(
       activeQueries.add(cancelWait);
       signal?.addEventListener("abort", onAbort, { once: true });
       if (timeoutMs !== undefined && Number.isFinite(timeoutMs) && timeoutMs > 0) {
-        timer = setTimeout(() => {
-          finish(
-            new QueryError("canceling statement due to statement timeout", { code: "57014" }),
-          );
-        }, timeoutMs);
+        timer = setTimeout(() => finish(statementTimeoutError()), timeoutMs);
       }
 
       void prevTurn.then(() => {
@@ -559,10 +559,18 @@ export async function openPostgres(
     checkSideCaller(signal);
 
     const prevTurn = sideTail;
-    let releaseTurn!: () => void;
+    let resolveTurn!: () => void;
     sideTail = new Promise<void>((resolve) => {
-      releaseTurn = resolve;
+      resolveTurn = resolve;
     });
+    sideOccupants++;
+    let released = false;
+    const releaseTurn = () => {
+      if (released) return;
+      released = true;
+      sideOccupants--;
+      resolveTurn();
+    };
 
     try {
       await waitForSideTurn(prevTurn, signal, options?.timeoutMs);
@@ -622,33 +630,61 @@ export async function openPostgres(
   }
 
   /**
-   * Fills the type name cache for `oids`. Called only outside a `withSide` slot (the queue is not
-   * reentrant), and takes its own short slot only on a cache miss.
+   * Looks up the uncached `oids` in pg_type and caches their names; an OID pg_type does not know is
+   * cached as its number. Runs inside a `withSide` slot.
    */
-  async function resolveTypeNames(oids: number[], signal?: AbortSignal): Promise<void> {
+  async function lookupTypeNames(oids: number[], signal: AbortSignal | undefined): Promise<void> {
+    const missing = [...new Set(oids.filter((oid) => !typeNames.has(oid)))];
+    if (missing.length === 0) return;
+
+    const rows = await sideQuery<{ oid: string | number; typname: string }[]>(
+      "select oid::bigint as oid, typname from pg_type where oid = any($1)",
+      [missing],
+      signal,
+    );
+    for (const row of rows) {
+      typeNames.set(Number(row.oid), row.typname);
+    }
+    for (const oid of missing) {
+      if (!typeNames.has(oid)) {
+        typeNames.set(oid, String(oid));
+      }
+    }
+  }
+
+  /**
+   * Fills the type name cache for a read-only Run's `oids`. Called only outside a `withSide` slot
+   * (the queue is not reentrant), and takes its own short slot only on a cache miss. The wait for
+   * that slot ends at `deadline` (the Run's timeout budget) with the statement-timeout QueryError.
+   */
+  async function resolveTypeNames(
+    oids: number[],
+    signal: AbortSignal | undefined,
+    deadline: number | undefined,
+  ): Promise<void> {
     if (oids.every((oid) => typeNames.has(oid))) return;
 
-    await withSide(
-      async () => {
-        const missing = [...new Set(oids.filter((oid) => !typeNames.has(oid)))];
-        if (missing.length === 0) return;
+    let timeoutMs: number | undefined;
+    if (deadline !== undefined) {
+      timeoutMs = deadline - performance.now();
+      if (timeoutMs <= 0) throw statementTimeoutError();
+    }
+    await withSide(() => lookupTypeNames(oids, signal), { signal, timeoutMs });
+  }
 
-        const rows = await sideQuery<{ oid: string | number; typname: string }[]>(
-          "select oid::bigint as oid, typname from pg_type where oid = any($1)",
-          [missing],
-          signal,
-        );
-        for (const row of rows) {
-          typeNames.set(Number(row.oid), row.typname);
-        }
-        for (const oid of missing) {
-          if (!typeNames.has(oid)) {
-            typeNames.set(oid, String(oid));
-          }
-        }
-      },
-      { signal },
-    );
+  /**
+   * Fills the type name cache for a user-connection Run's `oids` without ever waiting for a busy
+   * side client: its work may be waiting for a lock the user's own open transaction holds. While it
+   * is busy, uncached types show as their OIDs and are looked up in the background for later Runs.
+   */
+  async function resolveTypeNamesWithoutWaiting(oids: number[]): Promise<void> {
+    if (oids.every((oid) => typeNames.has(oid))) return;
+
+    if (sideOccupants === 0) {
+      await withSide(() => lookupTypeNames(oids, undefined));
+      return;
+    }
+    void withSide(() => lookupTypeNames(oids, undefined)).catch(() => {});
   }
 
   /** The Structure of one Relation; runs inside a `withSide` slot. Every value is a bound parameter. */
@@ -952,11 +988,7 @@ export async function openPostgres(
                   if (hasTimeout) {
                     const elapsed = performance.now() - start;
                     const rem = timeoutMs - elapsed;
-                    if (rem <= 0) {
-                      throw new QueryError("canceling statement due to statement timeout", {
-                        code: "57014",
-                      });
-                    }
+                    if (rem <= 0) throw statementTimeoutError();
                     remainingMs = Math.max(1, Math.floor(rem));
                   }
 
@@ -996,12 +1028,17 @@ export async function openPostgres(
           };
         }
 
-        // Outside the read-only slot (the queue is not reentrant). A Run on the user connection may
-        // already have written, so a late abort must not report it as canceled.
-        await resolveTypeNames(
-          rawColumns.map((c) => c.type),
-          isReadOnly ? signal : undefined,
-        );
+        // Outside the read-only slot (the queue is not reentrant). A read-only Run's lookup stays
+        // within its timeout budget. A Run on the user connection may already have written, so a
+        // late abort must not report it as canceled, and it never waits for a busy side client.
+        const oids = rawColumns.map((c) => c.type);
+        if (isReadOnly) {
+          const hasTimeout =
+            timeoutMs !== undefined && Number.isFinite(timeoutMs) && timeoutMs > 0;
+          await resolveTypeNames(oids, signal, hasTimeout ? start + timeoutMs : undefined);
+        } else {
+          await resolveTypeNamesWithoutWaiting(oids);
+        }
         const columns: Column[] = rawColumns.map((c) => ({
           name: c.name,
           type: typeNames.get(c.type) ?? String(c.type),

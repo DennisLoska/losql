@@ -1207,6 +1207,74 @@ suite("postgres relation details and the side queue", () => {
     expect((await driver.run("select 1 as ok", { readOnly: true })).rows).toEqual([[1]]);
   }, 20000);
 
+  test("a read-only Run's type-name lookup stays within its timeoutMs when other side work is queued", async () => {
+    // A fresh Session, so `inet` is not in its type name cache yet.
+    const session = await openSession(parseConnection(url!));
+    try {
+      const startedAt = performance.now();
+      const timed = session
+        .run("select pg_sleep(0.1), '1.2.3.4'::inet as addr", { readOnly: true, timeoutMs: 600 })
+        .then(
+          (result) => ({ result, error: null as unknown, at: performance.now() - startedAt }),
+          (error) => ({ result: null, error, at: performance.now() - startedAt }),
+        );
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      // Queued behind the timed Run's transaction, ahead of its type-name lookup.
+      const blocker = session.run("select pg_sleep(1.5) as slept", { readOnly: true });
+
+      const outcome = await timed;
+      expect(outcome.result).toBeNull();
+      expect(outcome.error).toBeInstanceOf(QueryError);
+      expect((outcome.error as QueryError).code).toBe("57014");
+      expect((outcome.error as QueryError).message).toContain("statement timeout");
+      expect(outcome.at).toBeLessThan(1100);
+
+      expect((await blocker).rows).toHaveLength(1);
+      const later = await session.run("select '5.6.7.8'::inet as addr", { readOnly: true });
+      expect(later.columns).toEqual([{ name: "addr", type: "inet" }]);
+    } finally {
+      await session.close();
+    }
+  }, 20000);
+
+  test("a user-connection Run with an uncached type does not wait for a side client blocked by its own transaction", async () => {
+    await driver.run(`create table ${schema}.locked_by_user (id int)`);
+    // A fresh Session, so `inet` is not in its type name cache yet.
+    const session = await openSession(parseConnection(url!));
+    try {
+      await session.run("begin");
+      await session.run(`lock table ${schema}.locked_by_user in access exclusive mode`);
+      // Holds the side client while it waits for the user connection's lock.
+      const blocked = session
+        .run(`select count(*)::int as n from ${schema}.locked_by_user`, { readOnly: true })
+        .then(
+          (result) => result,
+          (error) => error,
+        );
+      await new Promise((resolve) => setTimeout(resolve, 150));
+
+      const outcome = await Promise.race([
+        session.run("select '10.0.0.1'::inet as ip"),
+        new Promise<"hung">((resolve) => setTimeout(() => resolve("hung"), 3000)),
+      ]);
+      expect(outcome).not.toBe("hung");
+      const result = outcome as Awaited<ReturnType<Driver["run"]>>;
+      expect(result.columns).toEqual([{ name: "ip", type: "869" }]);
+      expect(result.rows).toEqual([["10.0.0.1"]]);
+
+      await session.run("rollback");
+      expect((await blocked).rows).toEqual([[0]]);
+
+      // The background lookup was queued behind the blocked Run; a read-only Run queued after it
+      // returns once it is done, and later Runs then show the resolved name.
+      await session.run("select 1", { readOnly: true });
+      const later = await session.run("select '10.0.0.2'::inet as ip");
+      expect(later.columns).toEqual([{ name: "ip", type: "inet" }]);
+    } finally {
+      await session.close();
+    }
+  }, 20000);
+
   test("close() rejects queued describeRelation() and schema() callers with a closed-Session QueryError", async () => {
     const session = await openSession(parseConnection(url!));
     const startedAt = performance.now();
