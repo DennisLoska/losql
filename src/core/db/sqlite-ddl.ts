@@ -206,17 +206,23 @@ const COLUMN_CONSTRAINT_WORDS = new Set([
 ]);
 
 /**
- * Where the inline `REFERENCES` clause at `at` ends: at the next column constraint, skipping its own
- * `SET NULL`, `SET DEFAULT` and `NOT DEFERRABLE`.
+ * Where the inline `REFERENCES` clause at `at` ends: at the next column constraint after its target
+ * table, column list and `MATCH name` (each of which may be spelled like a constraint word), skipping
+ * its own `SET NULL`, `SET DEFAULT` and `NOT DEFERRABLE`.
  */
 function referencesClauseEnd(toks: Tok[], at: number, end: number): number {
-  let j = at + 1;
+  // The target table is an identifier, even one spelled `generated` or `check`.
+  let j = at + 2;
   while (j < end) {
     const tok = toks[j]!;
     if (tok.punct === "(") {
       const close = matchParen(toks, j);
       if (close === -1) return end;
       j = close + 1;
+      continue;
+    }
+    if (tok.word === "match" && (toks[j + 1]?.ident ?? null) !== null) {
+      j += 2;
       continue;
     }
     const prev = toks[j - 1]!.word;
@@ -449,24 +455,56 @@ const OPERATOR_WORDS = new Set([
   "from",
 ]);
 
-/** Whether `tok` can end an expression, so an `ASC`/`DESC` after it is a sort order. */
-function endsOperand(tok: Tok): boolean {
+/** Postfix null tests: an operand ends with them. */
+const POSTFIX_WORDS = new Set(["isnull", "notnull"]);
+
+/** Operator words SQLite also accepts as identifiers (its fallback `LIKE_KW` and `MATCH`). */
+const IDENT_OPERATOR_WORDS = new Set(["like", "glob", "regexp", "match"]);
+
+/**
+ * Whether `toks[k]` stands where an operand is expected inside the term starting at `from`: first,
+ * or after `(`, `,`, a symbol operator or an operator word other than a postfix null test.
+ */
+function inOperandPosition(toks: Tok[], k: number, from: number): boolean {
+  if (k === from) return true;
+  const prev = toks[k - 1]!;
+  if (prev.punct === "(" || prev.punct === ",") return true;
+  if (prev.kind === "operator") return true;
+  if (OPERATOR_WORDS.has(prev.word) && !POSTFIX_WORDS.has(prev.word)) {
+    // A keyword-named operand before it makes it an operand, not an operator.
+    return !(IDENT_OPERATOR_WORDS.has(prev.word) && inOperandPosition(toks, k - 1, from));
+  }
+  return false;
+}
+
+/** Whether `toks[k]` can end an expression in the term starting at `from`, so an `ASC`/`DESC` after it is a sort order. */
+function endsOperand(toks: Tok[], k: number, from: number): boolean {
+  const tok = toks[k]!;
   if (tok.punct === ")") return true;
   if (tok.kind === "number") return true;
+  if (POSTFIX_WORDS.has(tok.word)) return true;
+  if (IDENT_OPERATOR_WORDS.has(tok.word)) return inOperandPosition(toks, k, from);
   return tok.ident !== null && !OPERATOR_WORDS.has(tok.word);
 }
 
 /**
- * Whether `toks[from..to)` holds an operator at depth zero. `COLLATE` binds tighter than every
- * binary operator, so a trailing `COLLATE name` after one belongs to its right operand.
+ * Whether the term `toks[from..to)` holds an operator outside parentheses. `COLLATE` binds tighter
+ * than every binary operator and `NOT`, so a trailing `COLLATE name` after one belongs to its operand;
+ * it binds looser than the unary `-`, `+` and `~` that may lead the term.
  */
 function hasTopLevelOperator(toks: Tok[], from: number, to: number): boolean {
+  let i = from;
+  while (i < to && toks[i]!.kind === "operator") i++;
   let depth = 0;
-  for (let i = from; i < to; i++) {
+  for (; i < to; i++) {
     const tok = toks[i]!;
     if (tok.punct === "(") depth++;
     else if (tok.punct === ")") depth--;
-    else if (depth === 0 && (tok.kind === "operator" || OPERATOR_WORDS.has(tok.word))) return true;
+    else if (depth !== 0) continue;
+    else if (tok.kind === "operator") return true;
+    else if (OPERATOR_WORDS.has(tok.word)) {
+      if (!IDENT_OPERATOR_WORDS.has(tok.word) || !inOperandPosition(toks, i, from)) return true;
+    }
   }
   return false;
 }
@@ -488,14 +526,14 @@ export function parseSqliteIndexDdl(sql: string): { terms: string[]; predicate?:
       if (
         end - 1 > from &&
         (toks[end - 1]!.word === "asc" || toks[end - 1]!.word === "desc") &&
-        endsOperand(toks[end - 2]!)
+        endsOperand(toks, end - 2, from)
       ) {
         end--;
       }
       if (
         end - 2 > from &&
         toks[end - 2]!.word === "collate" &&
-        !hasTopLevelOperator(toks, from + 1, end - 2)
+        !hasTopLevelOperator(toks, from, end - 2)
       ) {
         end -= 2;
       }

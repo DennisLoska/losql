@@ -680,6 +680,55 @@ describe("describeRelation", () => {
     expect(idx("ix_call").columns).toEqual(["lower(x)"]);
   });
 
+  test("an inline foreign key to a table named like a constraint word keeps its name and actions", async () => {
+    await driver.run('create table "generated" (id integer primary key)');
+    await driver.run(`create table gen_ref (
+      a integer constraint fk_a references generated(id) match simple on delete cascade,
+      b integer constraint fk_b references generated on update restrict not null
+    )`);
+
+    const details = await driver.describeRelation!({ namespace: "main", name: "gen_ref" });
+    const fks = details!.constraints!.filter((c) => c.kind === "FOREIGN KEY");
+    const byName = (name: string) => fks.find((c) => c.name === name);
+    expect(byName("fk_a")?.columns).toEqual(["a"]);
+    expect(byName("fk_a")?.references).toMatchObject({ relation: "generated", onDelete: "CASCADE" });
+    expect(byName("fk_b")?.columns).toEqual(["b"]);
+    expect(byName("fk_b")?.references).toMatchObject({ relation: "generated", onUpdate: "RESTRICT" });
+    expect(details!.columns.find((c) => c.name === "b")!.nullable).toBe(false);
+  });
+
+  test("index terms drop sort orders after postfix null tests and keyword-named operands", async () => {
+    await driver.run("create table ix_n (x int, glob int)");
+    await driver.run("create index ix_isnull on ix_n(x isnull desc)");
+    await driver.run("create index ix_notnull on ix_n(x NOTNULL ASC)");
+    await driver.run("create index ix_not_null on ix_n(x not null desc)");
+    await driver.run("create index ix_plus_glob on ix_n(x + glob desc)");
+    await driver.run("create index ix_glob_glob on ix_n(x glob glob desc)");
+
+    const details = await driver.describeRelation!({ namespace: "main", name: "ix_n" });
+    const idx = (name: string) => details!.indexes!.find((i) => i.name === name)!;
+    expect(idx("ix_isnull").columns).toEqual(["x isnull"]);
+    expect(idx("ix_notnull").columns).toEqual(["x NOTNULL"]);
+    expect(idx("ix_not_null").columns).toEqual(["x not null"]);
+    expect(idx("ix_plus_glob").columns).toEqual(["x + glob"]);
+    expect(idx("ix_glob_glob").columns).toEqual(["x glob glob"]);
+  });
+
+  test("index terms drop only a collation that applies to the whole term", async () => {
+    await driver.run("create table ix_c (x text, desc text)");
+    await driver.run("create index ix_not on ix_c(not x collate nocase)");
+    await driver.run("create index ix_paren on ix_c((x + desc) collate nocase)");
+    await driver.run("create index ix_neg on ix_c(-x collate nocase desc)");
+    await driver.run("create index ix_paren_op on ix_c((x) || desc collate nocase)");
+
+    const details = await driver.describeRelation!({ namespace: "main", name: "ix_c" });
+    const idx = (name: string) => details!.indexes!.find((i) => i.name === name)!;
+    expect(idx("ix_not").columns).toEqual(["not x collate nocase"]);
+    expect(idx("ix_paren").columns).toEqual(["(x + desc)"]);
+    expect(idx("ix_neg").columns).toEqual(["-x"]);
+    expect(idx("ix_paren_op").columns).toEqual(["(x) || desc collate nocase"]);
+  });
+
   test("an already aborted signal rejects with a cancellation error", async () => {
     const controller = new AbortController();
     controller.abort();
