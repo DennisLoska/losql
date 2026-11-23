@@ -419,7 +419,7 @@ describe("the JSON and Record views", () => {
     await app.press("<Space>vt");
     expect(app.api.results.view()).toBe("table");
     await app.press(":view nope<CR>");
-    expect(app.api.status.message()).toEqual({ text: "Unknown view: nope (table, json or record)", kind: "error" });
+    expect(app.api.status.message()).toEqual({ text: "Unknown view: nope (table, json, record or structure)", kind: "error" });
     await app.press("<Space>vj");
     await run("select 1 as one");
     expect(app.api.results.view()).toBe("table");

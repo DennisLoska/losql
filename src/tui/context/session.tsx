@@ -14,6 +14,7 @@ import {
   type Connection,
   type Driver,
   QueryError,
+  type RelationRef,
   type Result,
   type SchemaSnapshot,
 } from "../../core/db/types";
@@ -36,6 +37,8 @@ export interface RunRequest {
   maxRows?: number;          // default config.results.maxRows
   record?: boolean;          // append to history; default true
   show?: boolean;            // make the outcome what the Results Pane shows; default true
+  /** The Relation a shown, successful outcome was read from (a Schema peek); cleared by any other shown Run. */
+  previewRelationRef?: RelationRef;
 }
 export interface SessionApi {
   status(): SessionStatus;
@@ -52,6 +55,12 @@ export interface SessionApi {
   shown(): RunOutcome | null;                           // what the Results Pane shows
   show(outcome: RunOutcome | null): void;
   lastError(): Extract<RunOutcome, { ok: false }> | null;   // of the most recent recorded Run; cleared by a success
+  /** Advances whenever the Driver is replaced: connect, reopen after a loss, or teardown. */
+  sessionId(): number;
+  /** Advances whenever a schema refresh commits a snapshot for the current Driver. */
+  schemaRevision(): number;
+  /** The Relation the shown outcome was peeked from, or null when it came from anything else. */
+  previewRelationRef(): RelationRef | null;
 }
 
 const LOST_CONNECTION_CODES = new Set([
@@ -114,6 +123,17 @@ export function SessionProvider(
   const [runningSignal, setRunningSignal] = createSignal<{ statement: string; startedAt: number } | null>(null);
   const [shownSignal, setShownSignal] = createSignal<RunOutcome | null>(null);
   const [lastErrorSignal, setLastErrorSignal] = createSignal<Extract<RunOutcome, { ok: false }> | null>(null);
+  const [sessionIdSignal, setSessionIdSignal] = createSignal(0);
+  const [schemaRevisionSignal, setSchemaRevisionSignal] = createSignal(0);
+  const [previewRefSignal, setPreviewRefSignal] = createSignal<RelationRef | null>(null);
+
+  /** Every change of Driver goes through here, so the Session identity and peek provenance follow it. */
+  const setDriver = (next: Driver | null) => {
+    if (next === driverSignal()) return;
+    setDriverSignal(next);
+    setSessionIdSignal((id) => id + 1);
+    setPreviewRefSignal(null);
+  };
 
   let currentController: AbortController | null = null;
   let activeRun: { cancelled: boolean } | null = null;
@@ -135,6 +155,7 @@ export function SessionProvider(
       if (!closing && seq === schemaSeq && driverSignal() === activeDriver) {
         setSchemaErrorSignal(null);
         setSchemaSignal(snap);
+        setSchemaRevisionSignal((rev) => rev + 1);
       }
     } catch (err) {
       if (!closing && seq === schemaSeq && driverSignal() === activeDriver) {
@@ -188,7 +209,7 @@ export function SessionProvider(
       }
 
       const prevDriver = driverSignal();
-      setDriverSignal(nextDriver);
+      setDriver(nextDriver);
       setSessionStatus("connected");
       setShownSignal(null);
       setLastErrorSignal(null);
@@ -261,7 +282,7 @@ export function SessionProvider(
     if (!activeDriver) {
       return Promise.resolve();
     }
-    setDriverSignal(null);
+    setDriver(null);
     closePromise = Promise.resolve()
       .then(() => activeDriver.close())
       .catch(() => {});
@@ -328,7 +349,7 @@ export function SessionProvider(
       }
       const prev = activeDriver;
       activeDriver = reopened;
-      setDriverSignal(reopened);
+      setDriver(reopened);
       setSessionStatus("connected");
       void prev.close().catch(() => {});
       warnReopened();
@@ -486,6 +507,7 @@ export function SessionProvider(
       if (show && outcomes.length > 0) {
         if (errorOutcome) {
           setShownSignal(errorOutcome);
+          setPreviewRefSignal(null);
         } else {
           let withColumns: RunOutcome | null = null;
           for (let i = outcomes.length - 1; i >= 0; i--) {
@@ -496,6 +518,7 @@ export function SessionProvider(
             }
           }
           setShownSignal(withColumns ?? outcomes[outcomes.length - 1]!);
+          setPreviewRefSignal(request.previewRelationRef ?? null);
         }
       }
 
@@ -549,8 +572,12 @@ export function SessionProvider(
     shown: shownSignal,
     show: (outcome) => {
       setShownSignal(outcome);
+      setPreviewRefSignal(null);
     },
     lastError: lastErrorSignal,
+    sessionId: sessionIdSignal,
+    schemaRevision: schemaRevisionSignal,
+    previewRelationRef: previewRefSignal,
   };
 
   props.expose?.(api);

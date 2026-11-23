@@ -6,19 +6,24 @@ import {
   For,
   type JSX,
   Match,
+  on,
   onCleanup,
   Show,
   Switch,
+  untrack,
 } from "solid-js";
 import { copyToClipboard } from "../../../core/clipboard";
 import { cellText } from "../../../core/db/format";
-import type { Result } from "../../../core/db/types";
+import { extractPassword } from "../../../core/db/postgres";
+import { redactConnectionText, redactMessage } from "../../../core/db/redact";
+import type { Driver, RelationDetails, RelationRef, Result } from "../../../core/db/types";
 import type { VimMode } from "../../../core/vim/engine";
 import type { Key } from "../../../core/vim/keys";
 import { useCmdline, useCommands } from "../../context/commands";
 import { useConfig } from "../../context/config";
 import { useDeps } from "../../context/deps";
-import { useFocus } from "../../context/focus";
+import { useDialog } from "../../context/dialog";
+import { type PaneId, useFocus } from "../../context/focus";
 import { useKeys } from "../../context/keys";
 import { type RunOutcome, useSession } from "../../context/session";
 import { useStatus } from "../../context/status";
@@ -33,6 +38,16 @@ import { NULL_GLYPH, recordFields, rowsToJson, searchCells } from "./grid-model"
 import { JsonView } from "./JsonView";
 import { RecordView } from "./RecordView";
 import { type FlashSpec, ResultGrid } from "./ResultGrid";
+import { detailsFromSnapshot, findRelation, pickRelation, sameRelation } from "./relations";
+import {
+  sectionsOf,
+  sectionTable,
+  type StructureSection,
+  type StructureState,
+  StructureView,
+} from "./StructureView";
+
+export type { StructureSection, StructureState } from "./StructureView";
 
 export type ResultView = "table" | "json" | "record";
 
@@ -40,6 +55,12 @@ export interface ResultsApi {
   view(): ResultView;
   setView(view: ResultView): void;
   cursor(): { row: number; column: number };
+  /** Opens the Structure of a Relation in the Results Pane and focuses it. */
+  inspect(ref: RelationRef): void;
+  /** The Structure shown instead of the Result view, or null. */
+  structure(): StructureState | null;
+  /** The Relation most recently inspected, kept after Structure closes (the picker preselects it). */
+  lastInspected(): RelationRef | null;
 }
 
 const VIEWS: readonly { id: ResultView; label: string }[] = [
@@ -67,6 +88,7 @@ export function ResultsPane(props: {
   const cmdline = useCmdline();
   const commands = useCommands();
   const session = useSession();
+  const dialog = useDialog();
 
   const [view, setViewSignal] = createSignal<ResultView>("table");
   const [returnView, setReturnView] = createSignal<ResultView>("table");
@@ -160,6 +182,8 @@ export function ResultsPane(props: {
     const out = session.shown();
     if (out !== prevOutcome) {
       prevOutcome = out;
+      // A new outcome opens in the Table view, so Structure returns there too.
+      if (structureReturn) structureReturn.view = "table";
       stopFlash();
       stopCountUp();
       setViewSignal("table");
@@ -199,6 +223,337 @@ export function ResultsPane(props: {
     disposed = true;
   });
 
+  // ── Structure ────────────────────────────────────────────────────────────
+  // Structure replaces the Result view while it is open; it never touches `session.shown()`. Each load
+  // is tagged with a request id, the Session id and the Driver it was sent to, and its completion is
+  // accepted only while all three are still current.
+  const [structure, setStructure] = createSignal<StructureState | null>(null);
+  const [structureCursor, setStructureCursor] = createSignal({ row: 0, column: 0 });
+  const [structurePendingG, setStructurePendingG] = createSignal(false);
+  const [detailOpen, setDetailOpen] = createSignal(false);
+  const [definitionTop, setDefinitionTop] = createSignal(0);
+  const [structureFlash, setStructureFlash] = createSignal<FlashSpec | null>(null);
+  const [lastInspected, setLastInspected] = createSignal<RelationRef | null>(null);
+
+  // Where q returns: saved on the first entry, kept while the target changes.
+  let structureReturn: { view: ResultView; pane: PaneId } | null = null;
+  // Bumped on every entry from closed, so a picker opened from one Structure cannot act on another.
+  let structureEntry = 0;
+  let loadSeq = 0;
+  let loadController: AbortController | null = null;
+  let loadSessionId = -1;
+  let loadRevision = -1;
+  let structureGridRows = 8;
+  let definitionHeight = 8;
+  let cancelStructureFlash: (() => void) | null = null;
+
+  const stopStructureFlash = () => {
+    cancelStructureFlash?.();
+    cancelStructureFlash = null;
+    setStructureFlash(null);
+  };
+
+  const abortLoad = () => {
+    loadSeq++;
+    loadController?.abort();
+    loadController = null;
+  };
+
+  onCleanup(() => {
+    abortLoad();
+    stopStructureFlash();
+  });
+
+  // Also while a reload of the same Relation is in flight: what it showed stays usable until then.
+  const structureTable = createMemo(() => {
+    const state = structure();
+    if (!state || !state.details) return null;
+    return sectionTable(state.details, state.section);
+  });
+
+  const safeError = (err: unknown, driver: Driver): string => {
+    const raw = err instanceof Error ? err.message : String(err);
+    const url = driver.connection.url;
+    return printable(redactConnectionText(redactMessage(raw, { url, password: extractPassword(url) })));
+  };
+
+  const settleLoad = (details: RelationDetails | null) => {
+    setStructure((prev) => {
+      if (!prev) return prev;
+      if (details === null) return { ref: prev.ref, status: "missing", details: null, section: prev.section };
+      const section = sectionsOf(details).includes(prev.section) ? prev.section : "columns";
+      return { ref: prev.ref, status: "ready", details, section };
+    });
+  };
+
+  const loadStructure = (ref: RelationRef, section: StructureSection, keepDetails: boolean) => {
+    abortLoad();
+    const id = loadSeq;
+    const sessionId = untrack(session.sessionId);
+    const driver = untrack(session.driver);
+    loadSessionId = sessionId;
+    loadRevision = untrack(session.schemaRevision);
+    setStructure((prev) => ({
+      ref,
+      status: "loading",
+      // A reload of the same Relation keeps what it showed until the new Structure arrives.
+      details: keepDetails && prev && sameRelation(prev.ref, ref) ? prev.details : null,
+      section,
+    }));
+    if (!driver) {
+      setStructure({ ref, status: "error", details: null, error: "Not connected", section });
+      return;
+    }
+    if (!driver.describeRelation) {
+      const relation = findRelation(untrack(session.schema), ref);
+      settleLoad(relation ? detailsFromSnapshot(ref, relation) : null);
+      return;
+    }
+    const controller = new AbortController();
+    loadController = controller;
+    const current = () =>
+      !disposed && id === loadSeq && sessionId === session.sessionId() && driver === session.driver();
+    let pending: Promise<RelationDetails | null>;
+    try {
+      pending = driver.describeRelation(ref, { signal: controller.signal });
+    } catch (err) {
+      pending = Promise.reject(err);
+    }
+    pending.then(
+      (details) => {
+        if (!current()) return;
+        if (loadController === controller) loadController = null;
+        settleLoad(details);
+      },
+      (err) => {
+        if (!current()) return;
+        if (loadController === controller) loadController = null;
+        setStructure((prev) =>
+          prev ? { ref: prev.ref, status: "error", details: null, error: safeError(err, driver), section: prev.section } : prev,
+        );
+      },
+    );
+  };
+
+  const resetStructureCursor = () => {
+    setStructureCursor({ row: 0, column: 0 });
+    setStructurePendingG(false);
+    setDetailOpen(false);
+    setDefinitionTop(0);
+    stopStructureFlash();
+  };
+
+  function inspect(ref: RelationRef): void {
+    const open = untrack(structure);
+    if (open === null) {
+      structureReturn = { view: untrack(view), pane: untrack(focus.pane) };
+      structureEntry++;
+    }
+    const target = { namespace: ref.namespace, name: ref.name };
+    setLastInspected(target);
+    resetStructureCursor();
+    loadStructure(target, "columns", false);
+    focus.focus("results");
+  }
+
+  function closeStructure(options: { restore: boolean }): void {
+    abortLoad();
+    resetStructureCursor();
+    const back = structureReturn;
+    structureReturn = null;
+    setStructure(null);
+    if (options.restore && back) {
+      setViewSignal(back.view);
+      focus.focus(back.pane);
+    }
+  }
+
+  const reloadStructure = () => {
+    const state = untrack(structure);
+    if (state) loadStructure(state.ref, state.section, true);
+  };
+
+  // A new Session ends Structure: the Relation belongs to the Driver that is gone.
+  createEffect(
+    on(session.sessionId, () => {
+      if (untrack(structure) !== null) closeStructure({ restore: true });
+    }, { defer: true }),
+  );
+
+  // A committed schema refresh for the same Session reloads the open Structure.
+  createEffect(
+    on(session.schemaRevision, (revision) => {
+      if (untrack(structure) === null) return;
+      if (untrack(session.sessionId) !== loadSessionId || revision <= loadRevision) return;
+      reloadStructure();
+    }, { defer: true }),
+  );
+
+  const openStructurePicker = () => {
+    const state = untrack(structure);
+    if (!state) return;
+    const entry = structureEntry;
+    const sessionId = untrack(session.sessionId);
+    void pickRelation(dialog, untrack(session.schema), state.ref)
+      .then((chosen) => {
+        if (chosen === null || disposed) return;
+        if (entry !== structureEntry || untrack(structure) === null) return;
+        if (sessionId !== untrack(session.sessionId)) return;
+        inspect(chosen);
+      })
+      .catch((err) => {
+        status.say(printable(err instanceof Error ? err.message : String(err)), "error");
+      });
+  };
+
+  const setSection = (section: StructureSection) => {
+    setStructure((prev) => (prev && prev.section !== section ? { ...prev, section } : prev));
+    setStructureCursor({ row: 0, column: 0 });
+    setDetailOpen(false);
+    setDefinitionTop(0);
+    stopStructureFlash();
+  };
+
+  const moveStructureCursor = (dRow: number, dCol: number, absolute?: { row?: number; column?: number }) => {
+    const table = structureTable();
+    if (!table) return;
+    const cur = structureCursor();
+    const maxRow = Math.max(0, table.rows.length - 1);
+    const maxCol = Math.max(0, table.columns.length - 1);
+    const row = absolute?.row ?? cur.row + dRow;
+    const column = absolute?.column ?? cur.column + dCol;
+    setStructureCursor({
+      row: Math.max(0, Math.min(maxRow, row)),
+      column: Math.max(0, Math.min(maxCol, column)),
+    });
+  };
+
+  const scrollDefinition = (delta: number, absolute?: number) => {
+    const lines = (structure()?.details?.definition ?? "").split("\n").length;
+    const max = Math.max(0, lines - Math.max(1, definitionHeight));
+    const next = absolute ?? definitionTop() + delta;
+    setDefinitionTop(Math.max(0, Math.min(max, next)));
+  };
+
+  const yankStructure = () => {
+    const state = structure();
+    if (!state || !state.details) return;
+    let text: string | undefined;
+    let flashSpec: FlashSpec | null = null;
+    if (state.section === "definition") {
+      text = state.details.definition;
+    } else {
+      const table = structureTable();
+      const cur = structureCursor();
+      text = table?.rows[cur.row]?.[cur.column];
+      flashSpec = { rows: new Set([cur.row]), column: cur.column };
+    }
+    if (text === undefined) return;
+    const ref = state.ref;
+    const section = state.section;
+    void copyToClipboard(text, { write: deps.write, which: deps.which, exec: deps.exec }).then((res) => {
+      if (disposed) return;
+      if (!res.ok) {
+        status.say(`Could not copy: ${printable(res.reason)}`, "error");
+        return;
+      }
+      const now = untrack(structure);
+      if (!now || !sameRelation(now.ref, ref) || now.section !== section) return;
+      if (flashSpec && config.animations()) {
+        stopStructureFlash();
+        setStructureFlash(flashSpec);
+        cancelStructureFlash = deps.clock.after(150, () => {
+          cancelStructureFlash = null;
+          setStructureFlash(null);
+        });
+      }
+    });
+  };
+
+  const handleStructureKey = (key: Key): boolean => {
+    const state = structure();
+    if (!state) return false;
+    const isPlain = !key.ctrl && !key.meta;
+    const inDefinition = state.section === "definition";
+
+    if (structurePendingG()) {
+      setStructurePendingG(false);
+      if (isPlain && key.text === "g") {
+        if (inDefinition) scrollDefinition(0, 0);
+        else moveStructureCursor(0, 0, { row: 0 });
+        return true;
+      }
+    }
+
+    if (isPlain && key.name === "tab") {
+      const sections = sectionsOf(state.details);
+      const idx = Math.max(0, sections.indexOf(state.section));
+      const delta = key.shift ? -1 : 1;
+      setSection(sections[(idx + delta + sections.length) % sections.length]!);
+      return true;
+    }
+    if (isPlain && key.text && /^[1-4]$/.test(key.text)) {
+      const wanted = (["columns", "indexes", "constraints", "definition"] as const)[Number(key.text) - 1]!;
+      if (sectionsOf(state.details).includes(wanted)) setSection(wanted);
+      return true;
+    }
+    if (isPlain && key.text === "q") {
+      closeStructure({ restore: true });
+      return true;
+    }
+    if (key.name === "escape" && !key.ctrl && !key.meta) {
+      if (detailOpen()) {
+        setDetailOpen(false);
+        return true;
+      }
+      closeStructure({ restore: true });
+      return true;
+    }
+    if (isPlain && key.text === "c") {
+      openStructurePicker();
+      return true;
+    }
+    if (isPlain && key.text === "R") {
+      reloadStructure();
+      return true;
+    }
+    if (isPlain && key.text === "y") {
+      yankStructure();
+      return true;
+    }
+    if (isPlain && key.text === "g") {
+      setStructurePendingG(true);
+      return true;
+    }
+    if (isPlain && key.name === "enter") {
+      if (!inDefinition && structureTable()?.rows.length) setDetailOpen((open) => !open);
+      return true;
+    }
+
+    const half = (rows: number) => Math.max(1, Math.floor(rows / 2));
+    if (inDefinition) {
+      if (isPlain && (key.text === "j" || key.name === "down")) scrollDefinition(1);
+      else if (isPlain && (key.text === "k" || key.name === "up")) scrollDefinition(-1);
+      else if (isPlain && key.text === "G") scrollDefinition(0, Number.MAX_SAFE_INTEGER);
+      else if (key.ctrl && !key.meta && key.name === "d") scrollDefinition(half(definitionHeight));
+      else if (key.ctrl && !key.meta && key.name === "u") scrollDefinition(-half(definitionHeight));
+      else return false;
+      return true;
+    }
+
+    if (isPlain && (key.text === "j" || key.name === "down")) moveStructureCursor(1, 0);
+    else if (isPlain && (key.text === "k" || key.name === "up")) moveStructureCursor(-1, 0);
+    else if (isPlain && (key.text === "h" || key.name === "left")) moveStructureCursor(0, -1);
+    else if (isPlain && (key.text === "l" || key.name === "right")) moveStructureCursor(0, 1);
+    else if (isPlain && key.text === "0") moveStructureCursor(0, 0, { column: 0 });
+    else if (isPlain && key.text === "$") moveStructureCursor(0, 0, { column: Number.MAX_SAFE_INTEGER });
+    else if (isPlain && key.text === "G") moveStructureCursor(0, 0, { row: Number.MAX_SAFE_INTEGER });
+    else if (key.ctrl && !key.meta && key.name === "d") moveStructureCursor(half(structureGridRows), 0);
+    else if (key.ctrl && !key.meta && key.name === "u") moveStructureCursor(-half(structureGridRows), 0);
+    else return false;
+    return true;
+  };
+
   // Copies without blocking the key handler; the yanked cells flash only once
   // the copy happened (and the same result is still shown), a failed copy says
   // why instead. A result that arrives after the Pane is gone changes nothing.
@@ -219,6 +574,7 @@ export function ResultsPane(props: {
   };
 
   const setView = (nextView: ResultView) => {
+    if (untrack(structure) !== null) closeStructure({ restore: false });
     // q in Record returns to the view Record was entered from, so only entering Record records it.
     if (nextView === "record" && view() !== "record") setReturnView(view());
     setViewSignal(nextView);
@@ -678,6 +1034,7 @@ export function ResultsPane(props: {
   };
 
   function onKey(key: Key): boolean {
+    if (structure() !== null) return handleStructureKey(key);
     if (!key.ctrl && !key.meta && key.name === "tab") {
       if (!currentResult()) return false;
       cycleView(key.shift ? -1 : 1);
@@ -697,6 +1054,15 @@ export function ResultsPane(props: {
   });
 
   status.register("results", () => {
+    if (structure() !== null) {
+      const cur = structureCursor();
+      const table = structureTable();
+      return {
+        mode: "NORMAL",
+        pending: structurePendingG() ? "g" : "",
+        position: table && table.rows.length > 0 ? `${cur.row + 1}:${cur.column + 1}` : "",
+      };
+    }
     const res = currentResult();
     const v = view();
     if (res && v === "json" && jsonHandle) {
@@ -742,13 +1108,17 @@ export function ResultsPane(props: {
     id: "view.set",
     title: "Set the Result view",
     ex: ["view"],
-    run: (_ctx, args) => {
+    run: async (_ctx, args) => {
       const arg = args.trim();
       if (arg === "table" || arg === "json" || arg === "record") {
         setView(arg);
         return;
       }
-      throw new Error(`Unknown view: ${arg} (table, json or record)`);
+      if (arg === "structure") {
+        await commands.run("view.structure", "");
+        return;
+      }
+      throw new Error(`Unknown view: ${arg} (table, json, record or structure)`);
     },
   });
 
@@ -756,6 +1126,9 @@ export function ResultsPane(props: {
     view,
     setView,
     cursor: clampedCursor,
+    inspect,
+    structure,
+    lastInspected,
   };
 
   props.expose?.(api);
@@ -784,7 +1157,7 @@ export function ResultsPane(props: {
       <box flexDirection="row" gap={1} flexShrink={0}>
         <For each={VIEWS}>
           {(item) => {
-            const isActive = () => view() === item.id;
+            const isActive = () => structure() === null && view() === item.id;
             return (
               <text
                 fg={isActive() ? theme.color("primary") : theme.color("textMuted")}
@@ -796,6 +1169,16 @@ export function ResultsPane(props: {
             );
           }}
         </For>
+        <text
+          fg={structure() !== null ? theme.color("primary") : theme.color("textMuted")}
+          attributes={structure() !== null ? TextAttributes.BOLD : undefined}
+          flexShrink={0}
+          onMouseDown={() => {
+            void commands.run("view.structure", "");
+          }}
+        >
+          Structure
+        </text>
       </box>
       <Show
         when={session.running() !== null}
@@ -826,6 +1209,23 @@ export function ResultsPane(props: {
           <text fg={theme.color("textMuted")}>Run a statement with Enter</text>
         }
       >
+        <Match when={structure()}>
+          {(state: () => StructureState) => (
+            <StructureView
+              state={state()}
+              cursor={structureCursor()}
+              detailOpen={detailOpen()}
+              definitionTop={definitionTop()}
+              flash={structureFlash()}
+              onViewport={(vp) => {
+                structureGridRows = vp.rowCount;
+              }}
+              onDefinitionHeight={(height) => {
+                definitionHeight = height;
+              }}
+            />
+          )}
+        </Match>
         <Match when={session.shown() && !session.shown()!.ok}>
           {(() => {
             const err = () => (session.shown() as Extract<RunOutcome, { ok: false }>).error;

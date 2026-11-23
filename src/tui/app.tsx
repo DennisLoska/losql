@@ -31,6 +31,7 @@ import { openThemes } from "./dialogs/theme";
 import { Onboarding, type OnboardingStep } from "./onboarding/Onboarding";
 import type { EditorApi } from "./panes/editor/EditorPane";
 import type { ResultsApi } from "./panes/results/ResultsPane";
+import { pickRelation, resolveRelation } from "./panes/results/relations";
 import type { SchemaApi } from "./panes/schema/SchemaPane";
 import { setWidthMethod } from "./ui/cells";
 import { Cmdline } from "./ui/cmdline";
@@ -246,6 +247,38 @@ function AppShell(props: {
       } finally {
         modelPicking = false;
       }
+    },
+  });
+
+  // Structure of a Relation: the named one, else the Schema selection or the peeked Relation of the
+  // focused Pane, else the picker. A pick that resolves after the Session changed is dropped.
+  commands.register({
+    id: "view.structure",
+    title: "Inspect structure",
+    group: "View",
+    keys: "v s",
+    ex: ["inspect"],
+    run: async (ctx, args) => {
+      const arg = args.trim();
+      if (arg.length > 0) {
+        ctx.results.inspect(resolveRelation(ctx.session.schema(), arg));
+        return;
+      }
+      const pane = ctx.focus.pane();
+      const selected = pane === "schema" ? ctx.schema.selectedRelation() : null;
+      if (selected) {
+        ctx.results.inspect(selected);
+        return;
+      }
+      const peeked = pane === "results" ? ctx.session.previewRelationRef() : null;
+      if (peeked) {
+        ctx.results.inspect(peeked);
+        return;
+      }
+      const sessionId = ctx.session.sessionId();
+      const chosen = await pickRelation(ctx.dialog, ctx.session.schema(), ctx.results.lastInspected());
+      if (chosen === null || ctx.session.sessionId() !== sessionId) return;
+      ctx.results.inspect(chosen);
     },
   });
 
