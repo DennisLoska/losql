@@ -42,12 +42,22 @@ export function isNumericColumn(result: Result, column: number): boolean {
   return hasValue;
 }
 
-export function columnWidths(result: Result, sampleRows = 200): number[] {
-  const limit = Math.min(result.rows.length, Math.max(0, sampleRows));
-  return result.columns.map((col, colIdx) => {
+/** A column as a data grid draws it: its header name and the side its values line up on. */
+export interface GridColumn {
+  name: string;
+  align?: "left" | "right";
+}
+
+/** The widest drawn text of each column (header included), sampled over the first rows; a `Result` fits. */
+export function columnWidths(
+  data: { columns: readonly GridColumn[]; rows: readonly Cell[][] },
+  sampleRows = 200,
+): number[] {
+  const limit = Math.min(data.rows.length, Math.max(0, sampleRows));
+  return data.columns.map((col, colIdx) => {
     let maxW = cappedWidth(col.name, printable);
     for (let r = 0; r < limit; r++) {
-      const cell = result.rows[r]?.[colIdx] ?? null;
+      const cell = data.rows[r]?.[colIdx] ?? null;
       const w = cappedWidth(rawCellText(cell), cleanCellText);
       if (w > maxW) {
         maxW = w;
@@ -67,13 +77,37 @@ export function fit(text: string, width: number, align: "left" | "right"): strin
   return fitCells(text, width, align);
 }
 
+/** One drawn column: its value width and the padding cell drawn on each side of the value (0 or 1). */
+export interface ViewportSlot {
+  column: number;
+  valueWidth: number;
+  padding: 0 | 1;
+}
+
 export interface Viewport {
   firstRow: number;
   rowCount: number;
   firstColumn: number;
   columns: number[];
+  /** The drawn columns, left to right; `columns` lists their indices. */
+  slots: ViewportSlot[];
+  /** Whether a rule row is drawn under the header (from height three on). */
+  divider: boolean;
+  /** Whether columns are hidden left of the first drawn one. */
+  leftOverflow: boolean;
+  /** Whether columns are hidden right of the last drawn one. */
+  rightOverflow: boolean;
 }
 
+/** From this width on, the grid keeps one edge cell on each side for the overflow markers. */
+export const EDGE_MIN_WIDTH = 8;
+
+/**
+ * Which rows and columns a grid of `width` x `height` cells draws. The header takes one row and, from
+ * height three on, a rule row under it. From width eight on one edge cell is kept on each side; a slot
+ * costs its value plus one padding cell each side, and one separator cell sits between neighbour slots.
+ * Narrower grids draw only the cursor column. The scroll position moves only as far as the cursor needs.
+ */
 export function viewport(input: {
   widths: number[];
   rows: number;
@@ -83,7 +117,8 @@ export function viewport(input: {
   height: number;
 }): Viewport {
   const { widths, rows, cursor, previous, width, height } = input;
-  const maxDataRows = Math.max(0, height - 1);
+  const divider = height >= 3;
+  const maxDataRows = divider ? height - 2 : Math.max(0, height - 1);
   const rowCount = Math.min(Math.max(0, rows), maxDataRows);
 
   let firstRow = previous.firstRow;
@@ -100,45 +135,64 @@ export function viewport(input: {
   }
 
   const colCount = widths.length;
-  if (colCount === 0) {
-    return { firstRow, rowCount, firstColumn: 0, columns: [] };
+  const rowPart = { firstRow, rowCount, divider };
+  if (colCount === 0 || width <= 0) {
+    return { ...rowPart, firstColumn: 0, columns: [], slots: [], leftOverflow: false, rightOverflow: false };
   }
 
   const cursorCol = Math.max(0, Math.min(colCount - 1, cursor.column));
-  let firstColumn = Math.max(0, Math.min(colCount - 1, previous.firstColumn));
-  if (cursorCol < firstColumn) {
-    firstColumn = cursorCol;
+
+  if (width < EDGE_MIN_WIDTH) {
+    const padding = width >= 3 ? 1 : 0;
+    return {
+      ...rowPart,
+      firstColumn: cursorCol,
+      columns: [cursorCol],
+      slots: [{ column: cursorCol, valueWidth: width - 2 * padding, padding }],
+      leftOverflow: cursorCol > 0,
+      rightOverflow: cursorCol < colCount - 1,
+    };
   }
 
-  const takeFrom = (start: number): number[] => {
-    const cols: number[] = [];
+  const usable = width - 2;
+  const takeFrom = (start: number): ViewportSlot[] => {
+    const slots: ViewportSlot[] = [];
     let used = 0;
     for (let i = start; i < colCount; i++) {
-      const cost = widths[i]! + 1;
-      if (cols.length > 0 && used + cost > width) {
-        break;
+      const valueWidth = widths[i]!;
+      if (slots.length === 0) {
+        if (valueWidth + 2 > usable) {
+          slots.push({ column: i, valueWidth: Math.max(1, usable - 2), padding: 1 });
+          break;
+        }
+        slots.push({ column: i, valueWidth, padding: 1 });
+        used = valueWidth + 2;
+        continue;
       }
-      if (cols.length === 0 && cost > width) {
-        cols.push(i);
-        break;
-      }
-      cols.push(i);
+      const cost = valueWidth + 3;
+      if (used + cost > usable) break;
+      slots.push({ column: i, valueWidth, padding: 1 });
       used += cost;
     }
-    return cols;
+    return slots;
   };
 
-  let columns = takeFrom(firstColumn);
-  while (!columns.includes(cursorCol) && firstColumn < cursorCol) {
+  let firstColumn = Math.max(0, Math.min(colCount - 1, previous.firstColumn));
+  if (cursorCol < firstColumn) firstColumn = cursorCol;
+  let slots = takeFrom(firstColumn);
+  while (!slots.some((slot) => slot.column === cursorCol) && firstColumn < cursorCol) {
     firstColumn++;
-    columns = takeFrom(firstColumn);
+    slots = takeFrom(firstColumn);
   }
+  const lastColumn = slots[slots.length - 1]?.column ?? firstColumn;
 
   return {
-    firstRow,
-    rowCount,
+    ...rowPart,
     firstColumn,
-    columns,
+    columns: slots.map((slot) => slot.column),
+    slots,
+    leftOverflow: firstColumn > 0,
+    rightOverflow: lastColumn < colCount - 1,
   };
 }
 

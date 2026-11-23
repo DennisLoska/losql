@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import type { Result } from "../../../core/db/types";
 import {
-  columnWidths, displayCell, fit, isNumericColumn, recordFields, rowsToJson, searchCells, viewport,
+  columnWidths, displayCell, fit, type GridColumn, isNumericColumn, recordFields, rowsToJson, searchCells,
+  type Viewport, viewport,
 } from "./grid-model";
 
 const result: Result = {
@@ -38,6 +39,12 @@ test("columnWidths fit header and content up to the maximum", () => {
   expect(columnWidths(result)).toEqual([2, 12, 11, 40]);
   expect(columnWidths({ ...result, rows: [] })).toEqual([2, 4, 4, 4]);
   expect(columnWidths(result, 1)).toEqual([2, 4, 11, 4]);
+});
+
+test("columnWidths reads a plain grid of columns and rows, not only a Result", () => {
+  const columns: GridColumn[] = [{ name: "a" }, { name: "wide", align: "right" }];
+  expect(columnWidths({ columns, rows: [[1, "xy"]] })).toEqual([1, 4]);
+  expect(columnWidths({ columns, rows: [[1, "xy"]] }, 0)).toEqual([1, 4]);
 });
 
 test("fit pads and cuts", () => {
@@ -96,43 +103,153 @@ test("fit cuts between grapheme clusters and always draws to the exact width", (
 describe("viewport", () => {
   const widths = [10, 10, 10, 10, 10];
   const base = { widths, rows: 100, previous: { firstRow: 0, firstColumn: 0 } };
+  /** The cells a viewport draws: every slot, one separator between slots, and the two edge cells when they exist. */
+  const drawn = (vp: Viewport, width: number) =>
+    vp.slots.reduce((n, slot) => n + slot.valueWidth + 2 * slot.padding, 0) +
+    Math.max(0, vp.slots.length - 1) +
+    (width >= 8 ? 2 : 0);
 
   test("everything fits", () => {
-    expect(viewport({ ...base, rows: 3, cursor: { row: 0, column: 0 }, width: 80, height: 10 })).toEqual({
-      firstRow: 0, rowCount: 3, firstColumn: 0, columns: [0, 1, 2, 3, 4],
-    });
+    const vp = viewport({ ...base, rows: 3, cursor: { row: 0, column: 0 }, width: 80, height: 10 });
+    expect(vp.firstRow).toBe(0);
+    expect(vp.rowCount).toBe(3);
+    expect(vp.firstColumn).toBe(0);
+    expect(vp.columns).toEqual([0, 1, 2, 3, 4]);
+    expect(vp.slots).toEqual(widths.map((valueWidth, column) => ({ column, valueWidth, padding: 1 })));
+    expect(vp.divider).toBe(true);
+    expect(vp.leftOverflow).toBe(false);
+    expect(vp.rightOverflow).toBe(false);
   });
 
-  test("the header takes one row and each column one separator cell", () => {
-    const v = viewport({ ...base, cursor: { row: 0, column: 0 }, width: 33, height: 10 });
-    expect(v.rowCount).toBe(9);
-    expect(v.columns).toEqual([0, 1, 2]);
+  test("the header and its divider take two rows", () => {
+    const vp = viewport({ ...base, cursor: { row: 0, column: 0 }, width: 33, height: 10 });
+    expect(vp.rowCount).toBe(8);
+    expect(vp.divider).toBe(true);
+    // 1 edge cell + (10 + 2) + 1 separator + (10 + 2) + 1 edge cell = 27 cells, so two columns fit
+    expect(vp.columns).toEqual([0, 1]);
+    expect(vp.slots).toEqual([
+      { column: 0, valueWidth: 10, padding: 1 },
+      { column: 1, valueWidth: 10, padding: 1 },
+    ]);
+  });
+
+  test("a slot charges its value, one padding cell each side and one separator between slots", () => {
+    const vp = viewport({ ...base, rows: 1, cursor: { row: 0, column: 0 }, width: 66, height: 10 });
+    // 5 * (10 + 2) + 4 separators + 2 edge cells = 66: an exact fit
+    expect(vp.slots).toEqual(widths.map((valueWidth, column) => ({ column, valueWidth, padding: 1 })));
+    expect(drawn(vp, 66)).toBe(66);
+  });
+
+  test("one cell narrower drops the last column", () => {
+    const vp = viewport({ ...base, rows: 1, cursor: { row: 0, column: 0 }, width: 65, height: 10 });
+    expect(vp.columns).toEqual([0, 1, 2, 3]);
+    expect(vp.rightOverflow).toBe(true);
+    expect(drawn(vp, 65)).toBeLessThanOrEqual(65);
   });
 
   test("scrolls down and right only as far as needed to show the cursor", () => {
-    expect(viewport({ ...base, cursor: { row: 9, column: 0 }, width: 80, height: 10 }).firstRow).toBe(1);
-    expect(viewport({ ...base, cursor: { row: 50, column: 0 }, width: 80, height: 10 }).firstRow).toBe(42);
+    expect(viewport({ ...base, cursor: { row: 9, column: 0 }, width: 80, height: 10 }).firstRow).toBe(2);
+    expect(viewport({ ...base, cursor: { row: 50, column: 0 }, width: 80, height: 10 }).firstRow).toBe(43);
     const right = viewport({ ...base, cursor: { row: 0, column: 4 }, width: 33, height: 10 });
-    expect(right.firstColumn).toBe(2);
-    expect(right.columns).toEqual([2, 3, 4]);
+    expect(right.firstColumn).toBe(3);
+    expect(right.columns).toEqual([3, 4]);
+    expect(right.leftOverflow).toBe(true);
+    expect(right.rightOverflow).toBe(false);
   });
 
   test("keeps the previous scroll position when the cursor is still visible", () => {
-    const v = viewport({ ...base, previous: { firstRow: 40, firstColumn: 2 }, cursor: { row: 45, column: 3 }, width: 33, height: 10 });
-    expect([v.firstRow, v.firstColumn]).toEqual([40, 2]);
+    const vp = viewport({ ...base, previous: { firstRow: 40, firstColumn: 2 }, cursor: { row: 45, column: 3 }, width: 33, height: 10 });
+    expect([vp.firstRow, vp.firstColumn]).toEqual([40, 2]);
+    expect(vp.columns).toEqual([2, 3]);
   });
 
   test("scrolls back up and left", () => {
-    const v = viewport({ ...base, previous: { firstRow: 40, firstColumn: 2 }, cursor: { row: 10, column: 0 }, width: 33, height: 10 });
-    expect([v.firstRow, v.firstColumn]).toEqual([10, 0]);
+    const vp = viewport({ ...base, previous: { firstRow: 40, firstColumn: 2 }, cursor: { row: 10, column: 0 }, width: 33, height: 10 });
+    expect([vp.firstRow, vp.firstColumn]).toEqual([10, 0]);
+    expect(vp.columns).toEqual([0, 1]);
+    expect(vp.leftOverflow).toBe(false);
+    expect(vp.rightOverflow).toBe(true);
   });
 
-  test("a column wider than the Pane is still shown", () => {
-    expect(viewport({ widths: [40, 5], rows: 1, cursor: { row: 0, column: 0 }, previous: { firstRow: 0, firstColumn: 0 }, width: 20, height: 5 }).columns).toEqual([0]);
+  test("a column wider than the viewport is clamped to the usable width", () => {
+    const vp = viewport({ widths: [40, 5], rows: 1, cursor: { row: 0, column: 0 }, previous: { firstRow: 0, firstColumn: 0 }, width: 20, height: 5 });
+    // 1 edge + 1 padding + value + 1 padding + 1 edge = 20, so the value is drawn 16 cells wide
+    expect(vp.slots).toEqual([{ column: 0, valueWidth: 16, padding: 1 }]);
+    expect(vp.columns).toEqual([0]);
+    expect(vp.leftOverflow).toBe(false);
+    expect(vp.rightOverflow).toBe(true);
+    expect(drawn(vp, 20)).toBe(20);
+  });
+
+  test("widths below eight drop the edges and show only the cursor column", () => {
+    const at = (width: number, column = 0) =>
+      viewport({ widths: [10, 10], rows: 1, cursor: { row: 0, column }, previous: { firstRow: 0, firstColumn: 0 }, width, height: 5 });
+    expect(at(0)).toMatchObject({ slots: [], columns: [], leftOverflow: false, rightOverflow: false });
+    expect(at(1).slots).toEqual([{ column: 0, valueWidth: 1, padding: 0 }]);
+    expect(at(2).slots).toEqual([{ column: 0, valueWidth: 2, padding: 0 }]);
+    expect(at(3).slots).toEqual([{ column: 0, valueWidth: 1, padding: 1 }]);
+    expect(at(7).slots).toEqual([{ column: 0, valueWidth: 5, padding: 1 }]);
+    expect(at(7, 1)).toMatchObject({
+      slots: [{ column: 1, valueWidth: 5, padding: 1 }],
+      columns: [1],
+      firstColumn: 1,
+      leftOverflow: true,
+      rightOverflow: false,
+    });
+    for (const width of [1, 2, 3, 7]) expect(drawn(at(width), width)).toBeLessThanOrEqual(width);
+  });
+
+  test("width eight reserves the two edge cells", () => {
+    const vp = viewport({ widths: [10, 10], rows: 1, cursor: { row: 0, column: 0 }, previous: { firstRow: 0, firstColumn: 0 }, width: 8, height: 5 });
+    expect(vp.slots).toEqual([{ column: 0, valueWidth: 4, padding: 1 }]);
+    expect(vp.columns).toEqual([0]);
+    expect(vp.rightOverflow).toBe(true);
+    expect(drawn(vp, 8)).toBe(8);
+  });
+
+  test("the divider row only exists from height three on", () => {
+    const at = (height: number) =>
+      viewport({ widths: [4], rows: 10, cursor: { row: 0, column: 0 }, previous: { firstRow: 0, firstColumn: 0 }, width: 20, height });
+    expect(at(0)).toMatchObject({ divider: false, rowCount: 0 });
+    expect(at(1)).toMatchObject({ divider: false, rowCount: 0 });
+    expect(at(2)).toMatchObject({ divider: false, rowCount: 1 });
+    expect(at(3)).toMatchObject({ divider: true, rowCount: 1 });
+    expect(at(10)).toMatchObject({ divider: true, rowCount: 8 });
+  });
+
+  test("slots never draw past the width, wide Unicode values included", () => {
+    const columns: GridColumn[] = [{ name: "日本語" }, { name: "👍🏽" }, { name: "note" }];
+    const rows = [["👨‍👩‍👧‍👦", "🇩🇪", "1️⃣"], ["e\u0301", "日本語", "plain"]];
+    const colWidths = columnWidths({ columns, rows });
+    for (let width = 0; width <= 40; width++) {
+      for (const column of [0, 1, 2]) {
+        const vp = viewport({
+          widths: colWidths,
+          rows: rows.length,
+          cursor: { row: 0, column },
+          previous: { firstRow: 0, firstColumn: 0 },
+          width,
+          height: 6,
+        });
+        if (width === 0) {
+          expect(vp).toMatchObject({ slots: [], columns: [], leftOverflow: false, rightOverflow: false });
+          continue;
+        }
+        expect(drawn(vp, width)).toBeLessThanOrEqual(width);
+        expect(vp.slots.map((slot) => slot.column)).toEqual(vp.columns);
+        for (const slot of vp.slots) {
+          expect(slot.valueWidth).toBeGreaterThanOrEqual(1);
+          expect([0, 1]).toContain(slot.padding);
+        }
+        expect(vp.slots.map((slot) => slot.column)).toContain(column);
+      }
+    }
   });
 
   test("no rows", () => {
-    expect(viewport({ ...base, rows: 0, cursor: { row: 0, column: 0 }, width: 80, height: 10 }).rowCount).toBe(0);
+    const vp = viewport({ ...base, rows: 0, cursor: { row: 0, column: 0 }, width: 80, height: 10 });
+    expect(vp.rowCount).toBe(0);
+    expect(vp.firstRow).toBe(0);
   });
 });
 

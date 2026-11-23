@@ -41,8 +41,9 @@ function fixed(columns: string[], rows: Cell[][]): Partial<MountOptions> {
 }
 
 describe("the Results table draws columns where it measured them", () => {
-  // At width 40 the first column must leave room for the second, so its texts are repeated twice (no cut);
-  // at 80 and 120 they are repeated nine times, so the longer ones are cut at the column's 40 cells.
+  // A slot charges its value one padding cell each side, one cell separates neighbour slots and the grid
+  // keeps an edge cell on each side, so at width 40 the first column still leaves room for the second when
+  // its texts are repeated twice; at 80 and 120 they are repeated nine times and cut at the column's 40 cells.
   for (const [width, repeat] of [[40, 2], [80, 9], [120, 9]] as const) {
     test(`a marker column starts at the same x in every row at Pane width ${width}`, async () => {
       const rows: Cell[][] = [];
@@ -53,6 +54,10 @@ describe("the Results table draws columns where it measured them", () => {
       await app.api.session.run({ statements: ["select 1"] });
       app.api.focus.focus("results");
       await app.settle();
+      const frame = app.frame();
+      expect(frame).toContain("│");
+      expect(frame).toContain("─");
+      expect(frame).toContain("┼");
       const xs = rows.map((_, i) => {
         const at = cellsWith(app!.setup, `MK${String(i).padStart(2, "0")}`);
         return at.length === 1 ? at[0]!.x : -1;

@@ -85,7 +85,7 @@ export function ResultsPane(props: {
   const [animatedCount, setAnimatedCount] = createSignal(0);
 
   let jsonHandle: VimTextareaHandle | null = null;
-  let gridBoxHeight = 10;
+  let gridRowCount = 8;
   let recordBoxHeight = 10;
   let cancelFlash: (() => void) | null = null;
   let cancelCountUp: (() => void) | null = null;
@@ -219,7 +219,8 @@ export function ResultsPane(props: {
   };
 
   const setView = (nextView: ResultView) => {
-    setReturnView(view());
+    // q in Record returns to the view Record was entered from, so only entering Record records it.
+    if (nextView === "record" && view() !== "record") setReturnView(view());
     setViewSignal(nextView);
     setPendingCount("");
     setPendingOp("");
@@ -499,14 +500,14 @@ export function ResultsPane(props: {
 
     if (key.ctrl && !key.meta && key.name === "d") {
       clearPending();
-      const half = Math.max(1, Math.floor(Math.max(1, gridBoxHeight - 1) / 2));
+      const half = Math.max(1, Math.floor(gridRowCount / 2));
       moveTableCursor(half, 0);
       return true;
     }
 
     if (key.ctrl && !key.meta && key.name === "u") {
       clearPending();
-      const half = Math.max(1, Math.floor(Math.max(1, gridBoxHeight - 1) / 2));
+      const half = Math.max(1, Math.floor(gridRowCount / 2));
       moveTableCursor(-half, 0);
       return true;
     }
@@ -765,7 +766,9 @@ export function ResultsPane(props: {
     const res = outcome.result;
     const dur = formatDuration(res.durationMs);
     if (res.columns.length > 0) {
-      const count = config.animations() ? animatedCount() : res.rows.length;
+      // The count-up's first frame shows the final count, never "0 rows" for a Result that has rows.
+      const animated = animatedCount();
+      const count = !config.animations() || (animated === 0 && res.rows.length > 0) ? res.rows.length : animated;
       const unit = count === 1 ? "row" : "rows";
       const prefix = res.truncated ? `first ${count} ${unit}` : `${count} ${unit}`;
       return `${prefix} · ${dur}`;
@@ -874,8 +877,8 @@ export function ResultsPane(props: {
                 cursor={clampedCursor()}
                 selectedRows={selectedRowsRange()}
                 flash={flash()}
-                onViewport={(_vp, h) => {
-                  gridBoxHeight = h;
+                onViewport={(vp) => {
+                  gridRowCount = vp.rowCount;
                 }}
               />
             </Match>

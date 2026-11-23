@@ -3,7 +3,8 @@ import { createSignal, Show } from "solid-js";
 import { osc52 } from "../../../core/clipboard";
 import type { Cell, Connection, Driver, Result } from "../../../core/db/types";
 import type { ExecRequest, ExecResult } from "../../../core/exec";
-import { mount, spanWith, type MountOptions, type TestApp } from "../../testing";
+import { mount, cellsWith, spanWith, type MountOptions, type TestApp } from "../../testing";
+import type { Viewport } from "./grid-model";
 import { ResultsPane } from "./ResultsPane";
 
 let app: TestApp;
@@ -112,6 +113,129 @@ describe("the Table view", () => {
     await run("select 1");
     expect(app.frame()).toContain('{"a":[1,2]}');
     expect(app.frame()).toContain("∅");
+  });
+
+  test("the grid draws box-drawing separators, a header rule and a painted header", async () => {
+    await start();
+    await run(people);
+    const frame = app.frame();
+    expect(frame).toContain("│");
+    expect(frame).toContain("─");
+    expect(frame).toContain("┼");
+    expect(spanWith(app.spans(), "answer")!.bg.toInts()).toEqual(
+      app.api.theme.color("backgroundElement").toInts(),
+    );
+    const verticals = cellsWith(app.setup, "│");
+    const crosses = cellsWith(app.setup, "┼");
+    const dividerY = crosses[0]!.y;
+    const xsAt = (y: number) => verticals.filter((p) => p.y === y).map((p) => p.x);
+    // The header, the divider and the first body row share one slot grid.
+    expect(xsAt(dividerY - 1)).toEqual(xsAt(dividerY + 1));
+    for (const cross of crosses) expect(xsAt(dividerY - 1)).toContain(cross.x);
+  });
+
+  test("booleans, JSON, NULL and numbers keep their semantic colours", async () => {
+    await start(fixed(["flag", "meta", "n", "nothing"], [[true, { tier: "gold" }, 42, null]]));
+    await run("select 1");
+    expect(app.frame()).toContain('{"tier":"gold"}');
+    expect(spanWith(app.spans(), "true")!.fg.toInts()).toEqual(
+      app.api.theme.color("syntaxKeyword").toInts(),
+    );
+    expect(spanWith(app.spans(), '"gold"')!.fg.toInts()).toEqual(
+      app.api.theme.color("syntaxString").toInts(),
+    );
+    expect(spanWith(app.spans(), "∅")!.fg.toInts()).toEqual(
+      app.api.theme.color("textMuted").toInts(),
+    );
+    expect(app.frame()).toContain("42");
+  });
+
+  test("a numeric column is right-aligned", async () => {
+    await start(fixed(["label", "n"], [["aaaa", 1111], ["aaaa", 98765]]));
+    await run("select 1");
+    const short = cellsWith(app.setup, "1111")[0]!;
+    const long = cellsWith(app.setup, "98765")[0]!;
+    // Both values end on the same cell of the numeric column.
+    expect(short.x + 4).toBe(long.x + 5);
+  });
+
+  test("in Transparent mode unselected cells stay unpainted and selected cells are painted", async () => {
+    await start({ ...fixed(["name", "val"], [["Ada", "42"], ["Linus", "7"]]), config: { transparent: true } });
+    await run("select 1");
+    expect(app.api.theme.color("paneBackground").toInts()[3]).toBe(0);
+    expect(spanWith(app.spans(), "Linus")!.bg.toInts()[3]).toBe(0);
+    expect(spanWith(app.spans(), "Ada")!.bg.toInts()).toEqual(
+      app.api.theme.color("selection").toInts(),
+    );
+    await app.press("Vj");
+    expect(spanWith(app.spans(), "Linus")!.bg.toInts()).toEqual(
+      app.api.theme.color("selection").toInts(),
+    );
+  });
+
+  test("flash takes precedence over the cell selection colour", async () => {
+    const base = fixed(["name", "val"], [["Ada", "42"]]);
+    app = await mount({ ...base, animations: true });
+    await app.waitFor(() => app.api.session.status() === "connected");
+    await run("select 1");
+    expect(spanWith(app.spans(), "Ada")!.bg.toInts()).toEqual(
+      app.api.theme.color("selection").toInts(),
+    );
+    await app.press("Y");
+    expect(spanWith(app.spans(), "Ada")!.bg.toInts()).toEqual(
+      app.api.theme.color("primary").toInts(),
+    );
+    expect(spanWith(app.spans(), "42")!.bg.toInts()).toEqual(
+      app.api.theme.color("primary").toInts(),
+    );
+  });
+
+  test("wide Results mark the edges they overflow", async () => {
+    await start();
+    const columns = Array.from({ length: 12 }, (_, i) => `'${"v".repeat(18)}' as c${String(i + 1).padStart(2, "0")}`).join(", ");
+    await run(`select ${columns}`);
+    expect(app.frame()).toContain("›");
+    expect(app.frame()).not.toContain("‹");
+    await app.press("$");
+    expect(app.frame()).toContain("‹");
+    expect(app.frame()).not.toContain("›");
+  });
+
+  test("DataGrid mounts on plain columns and rows and reports its viewport", async () => {
+    const seen: Viewport[] = [];
+    const { DataGrid } = await import("./DataGrid");
+    app = await mount({
+      ui: () => (
+        <DataGrid
+          columns={[{ name: "a" }, { name: "b", align: "right" }]}
+          rows={[["x", 1], ["y", 2]]}
+          cursor={{ row: 0, column: 0 }}
+          selectedRows={null}
+          flash={null}
+          onViewport={(vp) => seen.push(vp)}
+        />
+      ),
+    });
+    await app.waitFor(() => app.api.session.status() === "connected");
+    await app.settle();
+    const frame = app.frame();
+    expect(frame).toContain("│");
+    expect(frame).toContain("─");
+    expect(seen.length).toBeGreaterThan(0);
+    const vp = seen[seen.length - 1]!;
+    expect(vp.slots.map((slot) => slot.column)).toEqual([0, 1]);
+    expect(vp.rowCount).toBe(2);
+  });
+
+  test("the first animated frame of a truncated Result does not say first 0 rows", async () => {
+    await start({ config: { results: { maxRows: 5 } }, animations: true });
+    await app.api.session.run({ statements: ["select * from orders"] });
+    app.api.focus.focus("results");
+    // No clock advance: the count-up is still on its first frame.
+    await app.settle();
+    const header = app.frame().split("\n").find((line) => line.includes("RESULTS"))!;
+    expect(header).not.toContain("first 0 rows");
+    expect(header).toContain("first 5 rows");
   });
 
   test("a cell with multi-codepoint grapheme clusters keeps the next column aligned", async () => {
@@ -259,6 +383,19 @@ describe("the JSON and Record views", () => {
     expect(cursor()).toEqual({ row: 1, column: 0 });
     await app.press("<CR><Esc>");
     expect(app.api.results.view()).toBe("table");
+  });
+
+  test("invoking Record again while in Record keeps JSON as the view q returns to", async () => {
+    await start();
+    await run(people);
+    await app.press("<Space>vj");
+    expect(app.api.results.view()).toBe("json");
+    await app.press("<Space>vr");
+    expect(app.api.results.view()).toBe("record");
+    await app.press("<Space>vr");
+    expect(app.api.results.view()).toBe("record");
+    await app.press("q");
+    expect(app.api.results.view()).toBe("json");
   });
 
   test("the Record view pretty-prints JSON values and yanks fields", async () => {

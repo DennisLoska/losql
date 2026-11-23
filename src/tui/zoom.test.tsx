@@ -53,7 +53,7 @@ describe("space z shows the Results Pane full screen", () => {
     expect(status).toBe(39);
     expect(lines()[status - 1]).toMatch(/row-\d+/); // the last drawn row sits directly above the status line
     expect(dataRows()).toBeGreaterThan(rowsBefore);
-    expect(dataRows()).toBe(status - 2); // the header line and the column names, then rows only
+    expect(dataRows()).toBe(status - 3); // the header line, the column names and their rule, then rows only
   });
 
   test("G shows the last row and gg the first", async () => {
@@ -66,7 +66,7 @@ describe("space z shows the Results Pane full screen", () => {
     expect(lines()[statusRow() - 1]).toContain("row-200");
     await app.press("gg");
     expect(app.api.results.cursor().row).toBe(0);
-    expect(lines()[2]).toMatch(/row-1(?!\d)/);
+    expect(lines()[3]).toMatch(/row-1(?!\d)/);
     await app.press("<C-d>");
     expect(app.api.results.cursor().row).toBeGreaterThan(10);
     await app.press("<C-u>");
@@ -249,11 +249,11 @@ describe("space z shows the Results Pane full screen", () => {
     expect(statusRow()).toBe(29);
     expect(lines()[0]).toContain("RESULTS");
     expect(lines()[28]).toMatch(/row-\d+/);
-    expect(dataRows()).toBe(27);
+    expect(dataRows()).toBe(26);
     await app.resize(150, 50);
     expect(statusRow()).toBe(49);
     expect(lines()[48]).toMatch(/row-\d+/);
-    expect(dataRows()).toBe(47);
+    expect(dataRows()).toBe(46);
     expect(app.frame()).not.toContain("SCHEMA");
   });
 
