@@ -21,6 +21,60 @@ import {
 
 const ROOT = resolve(import.meta.dir, "..");
 
+const installCommand = (version: string): string =>
+  `curl -fsSL https://raw.githubusercontent.com/DennisLoska/losql/v${version}/install.sh | sh`;
+
+function countInstallUrls(text: string): number {
+  const pattern = /https:\/\/raw\.githubusercontent\.com\/DennisLoska\/losql\/v\d+\.\d+\.\d+\/install\.sh/g;
+  return text.match(pattern)?.length ?? 0;
+}
+
+function readmeFixture(version: string): string {
+  return [
+    "Header",
+    `<img src="https://img.shields.io/badge/version-${version}-9ece6a?style=flat-square" alt="version ${version}" />`,
+    "",
+    "## Install",
+    "",
+    "```bash",
+    installCommand(version),
+    "```",
+    "",
+    "Footer",
+  ].join("\n");
+}
+
+function landingHtmlFixture(version: string): string {
+  return [
+    `<script type="application/ld+json">{"softwareVersion":"${version}"}</script>`,
+    `<div class="hero-install"><code id="hero-install-command">${installCommand(version)}</code></div>`,
+    `<section id="quickstart"><code id="install-command">${installCommand(version)}</code></section>`,
+    `<p class="footer-facts">Open Source · MIT · SQLite &amp; Postgres · Single Binary · Omarchy First · v${version}</p>`,
+  ].join("\n");
+}
+
+function landingBuildFixture(version: string): string {
+  return [
+    "writeFileSync(",
+    '  path.join(OUT, "llms.txt"),',
+    "  [",
+    '    "# losql",',
+    `    "- Install prebuilt binary (Linux & macOS): \`${installCommand(version)}\`.",`,
+    '  ].join("\\n"),',
+    ");",
+  ].join("\n");
+}
+
+function versionSourcesFixture(version: string) {
+  return {
+    packageJson: `{\n  "name": "losql",\n  "version": "${version}"\n}\n`,
+    readmeMd: readmeFixture(version),
+    landingHtml: landingHtmlFixture(version),
+    landingBuild: landingBuildFixture(version),
+    changelogMd: `# Changelog\n\n## [${version}] - 2026-11-16\n\n- Initial release.\n`,
+  };
+}
+
 describe("version & tag validation", () => {
   test("validates strict semver X.Y.Z and normalised vX.Y.Z tags", () => {
     expect(isValidSemver("0.2.0")).toBe(true);
@@ -37,14 +91,8 @@ describe("version & tag validation", () => {
     expect(normalizeTag("v1.2")).toBeNull();
   });
 
-  test("checkVersionSources verifies package.json, README.md, landing/src/index.html, and CHANGELOG.md", () => {
-    const validSources = {
-      packageJson: JSON.stringify({ name: "losql", version: "0.2.0" }, null, 2),
-      readmeMd: '<img src="https://img.shields.io/badge/version-0.2.0-9ece6a?style=flat-square" alt="version 0.2.0" />',
-      landingHtml:
-        '<script type="application/ld+json">{"softwareVersion":"0.2.0"}</script><code id="install-command">curl -fsSL https://raw.githubusercontent.com/DennisLoska/losql/v0.2.0/install.sh | sh</code><p class="footer-facts">Open Source · MIT · SQLite &amp; Postgres · Single Binary · Omarchy First · v0.2.0</p>',
-      changelogMd: "# Changelog\n\n## [0.2.0] - 2026-11-16\n\n- Initial release.\n",
-    };
+  test("checkVersionSources verifies package.json, README.md, landing/src/index.html, landing/build.mjs, and CHANGELOG.md", () => {
+    const validSources = versionSourcesFixture("0.2.0");
 
     expect(checkVersionSources(validSources)).toEqual([]);
     expect(checkVersionSources(validSources, "v0.2.0")).toEqual([]);
@@ -56,21 +104,19 @@ describe("version & tag validation", () => {
 
     const driftedReadme = checkVersionSources({
       ...validSources,
-      readmeMd: '<img src="https://img.shields.io/badge/version-0.1.0-9ece6a?style=flat-square" alt="version 0.1.0" />',
+      readmeMd: readmeFixture("0.2.0").replace("version-0.2.0-9ece6a", "version-0.1.0-9ece6a"),
     });
     expect(driftedReadme.some((p) => p.includes("README.md"))).toBe(true);
 
     const driftedLanding = checkVersionSources({
       ...validSources,
-      landingHtml:
-        '<script type="application/ld+json">{"softwareVersion":"0.1.0"}</script><code id="install-command">curl -fsSL https://raw.githubusercontent.com/DennisLoska/losql/v0.2.0/install.sh | sh</code><p class="footer-facts">Open Source · MIT · SQLite &amp; Postgres · Single Binary · Omarchy First · v0.2.0</p>',
+      landingHtml: landingHtmlFixture("0.2.0").replace('"softwareVersion":"0.2.0"', '"softwareVersion":"0.1.0"'),
     });
     expect(driftedLanding.some((p) => p.includes("landing/src/index.html"))).toBe(true);
 
     const driftedInstallUrl = checkVersionSources({
       ...validSources,
-      landingHtml:
-        '<script type="application/ld+json">{"softwareVersion":"0.2.0"}</script><code id="install-command">curl -fsSL https://raw.githubusercontent.com/DennisLoska/losql/v0.1.0/install.sh | sh</code><p class="footer-facts">Open Source · MIT · SQLite &amp; Postgres · Single Binary · Omarchy First · v0.2.0</p>',
+      landingHtml: landingHtmlFixture("0.1.0"),
     });
     expect(driftedInstallUrl.some((p) => p.includes("install.sh"))).toBe(true);
 
@@ -81,24 +127,85 @@ describe("version & tag validation", () => {
     expect(missingChangelog.some((p) => p.includes("CHANGELOG.md"))).toBe(true);
   });
 
-  test("bumpVersionSources updates version across package.json, README.md, and landing/src/index.html", () => {
+  test("bumpVersionSources updates version across package.json, README.md, landing/src/index.html, and landing/build.mjs", () => {
     const initial = {
       packageJson: '{\n  "name": "losql",\n  "version": "0.2.0"\n}\n',
-      readmeMd:
-        'Header\n<img src="https://img.shields.io/badge/version-0.2.0-9ece6a?style=flat-square" alt="version 0.2.0" />\nFooter\n',
-      landingHtml:
-        '<script type="application/ld+json">{"softwareVersion":"0.2.0"}</script>\n<code id="install-command">curl -fsSL https://raw.githubusercontent.com/DennisLoska/losql/v0.2.0/install.sh | sh</code>\n<p class="footer-facts">Open Source · MIT · SQLite &amp; Postgres · Single Binary · Omarchy First · v0.2.0</p>\n',
+      readmeMd: readmeFixture("0.2.0"),
+      landingHtml: landingHtmlFixture("0.2.0"),
+      landingBuild: landingBuildFixture("0.2.0"),
       changelogMd: "# Changelog\n\n## [0.3.0] - 2026-11-16\n\n- Next release.\n",
     };
 
     const bumped = bumpVersionSources(initial, "0.3.0");
     expect(JSON.parse(bumped.packageJson).version).toBe("0.3.0");
+
     expect(bumped.readmeMd).toContain("version-0.3.0-9ece6a");
     expect(bumped.readmeMd).toContain('alt="version 0.3.0"');
+    expect(bumped.readmeMd).toContain(installCommand("0.3.0"));
+    expect(bumped.readmeMd).not.toContain(installCommand("0.2.0"));
+    expect(bumped.readmeMd).toContain("## Install");
+
     expect(bumped.landingHtml).toContain('"softwareVersion":"0.3.0"');
-    expect(bumped.landingHtml).toContain("https://raw.githubusercontent.com/DennisLoska/losql/v0.3.0/install.sh");
+    expect(countInstallUrls(bumped.landingHtml)).toBe(2);
+    expect(bumped.landingHtml).toContain(`<code id="hero-install-command">${installCommand("0.3.0")}</code>`);
+    expect(bumped.landingHtml).toContain(`<code id="install-command">${installCommand("0.3.0")}</code>`);
     expect(bumped.landingHtml).toContain("Omarchy First · v0.3.0</p>");
+
+    expect(bumped.landingBuild).toContain(installCommand("0.3.0"));
+    expect(bumped.landingBuild).not.toContain("v0.2.0");
+    expect(bumped.landingBuild).toContain('path.join(OUT, "llms.txt")');
+    expect(countInstallUrls(bumped.landingBuild)).toBe(1);
+
     expect(checkVersionSources({ ...bumped, changelogMd: initial.changelogMd }, "v0.3.0")).toEqual([]);
+  });
+});
+
+describe("landing llms.txt & repeated install URL pins", () => {
+  test("checkVersionSources accepts a landingBuild whose llms.txt install line matches package.json", () => {
+    const sources = versionSourcesFixture("0.2.0");
+    expect(countInstallUrls(sources.landingBuild)).toBe(1);
+    expect(checkVersionSources(sources)).toEqual([]);
+  });
+
+  test("checkVersionSources flags a stale pinned install URL in landing/build.mjs", () => {
+    const problems = checkVersionSources({
+      ...versionSourcesFixture("0.2.0"),
+      landingBuild: landingBuildFixture("0.1.0"),
+    });
+    expect(problems.some((p) => p.includes("landing/build.mjs"))).toBe(true);
+    expect(problems.some((p) => p.includes("0.1.0"))).toBe(true);
+  });
+
+  test("checkVersionSources flags a missing pinned install URL in landing/build.mjs", () => {
+    const problems = checkVersionSources({
+      ...versionSourcesFixture("0.2.0"),
+      landingBuild: landingBuildFixture("0.2.0").replace(
+        "https://raw.githubusercontent.com/DennisLoska/losql/v0.2.0/install.sh",
+        "https://losql.dev/install.sh",
+      ),
+    });
+    expect(problems.some((p) => p.includes("landing/build.mjs"))).toBe(true);
+  });
+
+  test("checkVersionSources flags a stale quickstart install URL when only the hero command was bumped", () => {
+    const sources = versionSourcesFixture("0.2.0");
+    const problems = checkVersionSources({
+      ...sources,
+      landingHtml: sources.landingHtml.replace(
+        `<code id="install-command">${installCommand("0.2.0")}</code>`,
+        `<code id="install-command">${installCommand("0.1.0")}</code>`,
+      ),
+    });
+    expect(problems.some((p) => p.includes("landing/src/index.html") && p.includes("0.1.0"))).toBe(true);
+  });
+
+  test("checkVersionSources flags a stale install URL in README.md", () => {
+    const sources = versionSourcesFixture("0.2.0");
+    const problems = checkVersionSources({
+      ...sources,
+      readmeMd: sources.readmeMd.replace(installCommand("0.2.0"), installCommand("0.1.0")),
+    });
+    expect(problems.some((p) => p.includes("README.md") && p.includes("0.1.0"))).toBe(true);
   });
 });
 
@@ -241,15 +348,28 @@ describe("target matrix, packaging, and checksums", () => {
 });
 
 describe("repository maturity files & install.sh", () => {
-  test("current repository passes checkVersionSources for v0.2.0", () => {
+  test("current repository passes checkVersionSources against the live package.json version", () => {
+    const packageJson = readFileSync(join(ROOT, "package.json"), "utf8");
+    const currentTag = `v${JSON.parse(packageJson).version}`;
+    const readmeMd = readFileSync(join(ROOT, "README.md"), "utf8");
+    const landingHtml = readFileSync(join(ROOT, "landing/src/index.html"), "utf8");
+    const landingBuild = readFileSync(join(ROOT, "landing/build.mjs"), "utf8");
+
+    // The live repository must exercise the repeated-pin checks: hero and quickstart install
+    // commands in the landing page, the README install command, and the llms.txt install line.
+    expect(countInstallUrls(landingHtml)).toBe(2);
+    expect(countInstallUrls(readmeMd)).toBeGreaterThanOrEqual(1);
+    expect(countInstallUrls(landingBuild)).toBe(1);
+
     const problems = checkVersionSources(
       {
-        packageJson: readFileSync(join(ROOT, "package.json"), "utf8"),
-        readmeMd: readFileSync(join(ROOT, "README.md"), "utf8"),
-        landingHtml: readFileSync(join(ROOT, "landing/src/index.html"), "utf8"),
+        packageJson,
+        readmeMd,
+        landingHtml,
+        landingBuild,
         changelogMd: readFileSync(join(ROOT, "CHANGELOG.md"), "utf8"),
       },
-      "v0.2.0",
+      currentTag,
     );
     expect(problems).toEqual([]);
   });

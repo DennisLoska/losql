@@ -46,6 +46,7 @@ check() {
 }
 on_screen() { screen | grep -qF -- "$1"; }
 on_screen_re() { screen | grep -qE -- "$1"; }
+off_screen() { ! on_screen "$1"; }
 
 # expect "<description>" "<text that must be on screen>"
 expect() { check "$1" "to see: $2" on_screen "$2"; }
@@ -92,11 +93,12 @@ base_unpainted() {
     [ $(( $(cells_on default) * 2 )) -gt "$(all_cells)" ]
 }
 
+CONFIG_DIR="" STATE_DIR=""   # set per start; empty means the shared $WORK/config and $WORK/state
 start() { # start <connection> [columns rows]
   local connection="$1" width="${2:-140}" height="${3:-40}" command
   tmux kill-session -t "=$SESSION" 2>/dev/null
   command="$(printf 'env LOSQL_CONFIG_DIR=%q LOSQL_STATE_DIR=%q LOSQL_NO_ANIMATIONS=1 %q %q' \
-    "$WORK/config" "$WORK/state" "$BIN" "$connection")"
+    "${CONFIG_DIR:-$WORK/config}" "${STATE_DIR:-$WORK/state}" "$BIN" "$connection")"
   tmux new-session -d -s "$SESSION" -x "$width" -y "$height" "$command"
   sleep 1
 }
@@ -159,7 +161,51 @@ keys C-w h
 # orders (12 rows), not customers: the 8 rows of the Run before are on screen already.
 keys j j j Enter
 expect "peeking at a relation shows its rows" "12 rows"
+
+echo "== structure =="
+# S on the selected Relation (orders) inspects its Structure in the Results Pane.
+keys S
+expect "S in Schema opens the Structure of orders" "orders  table  4 cols"
+expect "Structure shows the Columns section" "Columns (4)"
+expect_re "Structure lists customer_id with its foreign key" "customer_id +│ +integer +│.*FK -> customers\.id"
+keys Tab
+expect "Tab switches to Indexes (orders has none)" "No indexes"
+keys Tab
+expect_re "Tab switches to Constraints with the FOREIGN KEY" "│ FOREIGN KEY +│ customer_id +│ -> customers\(id\)"
+keys 1
+expect_re "1 switches back to Columns" "ordered_at +│ +text"
+keys q
+expect "q returns to the prior Result view" "12 rows"
+check "q leaves the Structure" "no Structure sections on screen" off_screen "Columns (4)"
+# Schema has the focus again: j then Enter peeks the next Relation (products, 6 rows).
+keys j Enter
+expect "q returns the focus to Schema" "6 rows"
+
+# A Relation with an index: the demo's customers carries a unique autoindex.
+keys ":"; type_text "inspect customers"; keys Enter
+keys Tab
+expect "Indexes lists the customers autoindex" "sqlite_autoindex_customers_1"
+keys q
+expect "q after :inspect returns to the peeked products" "6 rows"
+
+echo "== structure from the JSON view =="
 keys C-w l
+keys C-w j
+keys Space v j
+expect "Space v j shows the JSON view" '"name": "Mechanical Keyboard"'
+# Space v s in Results inspects the peeked Relation (products).
+keys Space v s
+expect "Space v s inspects the peeked Relation" "products  table  4 cols"
+keys q
+expect "q restores the JSON view" '"name": "Mechanical Keyboard"'
+check "q from Space v s leaves the Structure" "no Structure sections on screen" off_screen "Columns (4)"
+keys ":"; type_text "inspect orders"; keys Enter
+expect ":inspect orders opens its Structure" "orders  table  4 cols"
+keys q
+expect "q after :inspect restores the JSON view" '"name": "Mechanical Keyboard"'
+keys Space v t
+expect_re "Space v t returns to the Table view" "Mechanical Keyboard +│"
+keys C-w k
 
 echo "== agent pane and provider dialog =="
 keys Space a a
@@ -252,6 +298,22 @@ check "the item the eleventh ctrl+n selects is on screen above the Results Pane"
   "the accepted name on a popup row above RESULTS before the <CR>" selection_was_visible
 echo "      (accepted: ${accepted:-nothing})"
 
+echo "== a custom leader in the setup advice =="
+# An isolated config with leader "," and no Provider: the advice names the configured shortcut.
+CONFIG_DIR="$WORK/leader-config" STATE_DIR="$WORK/leader-state"
+mkdir -p "$CONFIG_DIR" "$STATE_DIR"
+printf '{ "leader": "," }\n' > "$CONFIG_DIR/config.json"
+printf '{ "onboarded": true }\n' > "$STATE_DIR/state.json"
+start demo
+expect "the custom leader shows in the statusline" ", menu"
+keys ":"; type_text "ask test"; keys Enter
+expect ":ask without a Provider advises the configured shortcut" "No agent is set up (use , p)"
+check "the advice does not hardcode space p" "no 'space p' on screen" off_screen "space p"
+keys ","; keys p
+expect ", p opens the provider dialog" "Antigravity"
+keys Escape
+CONFIG_DIR="" STATE_DIR=""
+
 if [ -n "${LOSQL_VERIFY_PG_URL:-}" ]; then
   echo "== Postgres =="
   start "$LOSQL_VERIFY_PG_URL"
@@ -263,7 +325,7 @@ if [ -n "${LOSQL_VERIFY_PG_URL:-}" ]; then
   keys Escape
   keys Enter
   # The Result's row: 42 next to the date now() gave (the Statement in the editor has neither).
-  expect_re "a Postgres result" '42 +[0-9]{4}-[0-9]{2}-[0-9]{2}'
+  expect_re "a Postgres result" '42 +│ +[0-9]{4}-[0-9]{2}-[0-9]{2}'
   expect "one row" "1 row"
   keys C-w j
   keys Tab

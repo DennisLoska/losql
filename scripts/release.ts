@@ -64,14 +64,26 @@ export const ARCHIVE_FILES = ["LICENSE", "NOTICE", "README.md"] as const;
 const SEMVER_RE = /^\d+\.\d+\.\d+$/;
 const README_BADGE_RE = /(https:\/\/img\.shields\.io\/badge\/version-)(\d+\.\d+\.\d+)(-9ece6a\?style=flat-square"\s+alt="version\s+)(\d+\.\d+\.\d+)(")/;
 const LANDING_JSONLD_RE = /("softwareVersion"\s*:\s*")(\d+\.\d+\.\d+)(")/;
-const LANDING_INSTALL_URL_RE = /(https:\/\/raw\.githubusercontent\.com\/DennisLoska\/losql\/v)(\d+\.\d+\.\d+)(\/install\.sh\s*\|\s*sh)/;
+const INSTALL_URL_RE = /(https:\/\/raw\.githubusercontent\.com\/DennisLoska\/losql\/v)(\d+\.\d+\.\d+)(\/install\.sh)/g;
 const LANDING_FOOTER_RE = /(Omarchy First · v)(\d+\.\d+\.\d+)(<\/p>)/;
 
 export interface VersionSources {
   packageJson: string;
   readmeMd: string;
   landingHtml: string;
+  landingBuild: string;
   changelogMd: string;
+}
+
+/** Sources carrying a pinned installer URL, keyed by the repository path used in problem reports. */
+const INSTALL_URL_SOURCES = [
+  ["README.md", "readmeMd"],
+  ["landing/src/index.html", "landingHtml"],
+  ["landing/build.mjs", "landingBuild"],
+] as const satisfies readonly (readonly [string, keyof VersionSources])[];
+
+function installUrlVersions(text: string): string[] {
+  return [...text.matchAll(INSTALL_URL_RE)].map((match) => match[2]!);
 }
 
 export function isValidSemver(version: string): boolean {
@@ -150,11 +162,15 @@ export function checkVersionSources(sources: VersionSources, expectedTagOrVersio
     problems.push(`landing/src/index.html: JSON-LD softwareVersion "${jsonLdMatch[2]}" does not match package.json "${canonical}"`);
   }
 
-  const installUrlMatch = LANDING_INSTALL_URL_RE.exec(sources.landingHtml);
-  if (!installUrlMatch) {
-    problems.push("landing/src/index.html: version-pinned install.sh command not found");
-  } else if (installUrlMatch[2] !== canonical) {
-    problems.push(`landing/src/index.html: install.sh URL version "v${installUrlMatch[2]}" does not match package.json "${canonical}"`);
+  for (const [path, key] of INSTALL_URL_SOURCES) {
+    const versions = installUrlVersions(sources[key]);
+    if (versions.length === 0) {
+      problems.push(`${path}: version-pinned install.sh URL not found`);
+      continue;
+    }
+    for (const stale of new Set(versions.filter((version) => version !== canonical))) {
+      problems.push(`${path}: install.sh URL version "v${stale}" does not match package.json "${canonical}"`);
+    }
   }
 
   const footerMatch = LANDING_FOOTER_RE.exec(sources.landingHtml);
@@ -186,28 +202,34 @@ export function bumpVersionSources(
   if (!packageJsonRe.test(sources.packageJson)) {
     throw new Error("package.json: version field not found");
   }
-  const packageJson = sources.packageJson.replace(packageJsonRe, `$1${v}$3`);
+  const packageJson = sources.packageJson.replace(packageJsonRe, (_m, a: string, _b: string, c: string) => `${a}${v}${c}`);
 
+  for (const [path, key] of INSTALL_URL_SOURCES) {
+    if (installUrlVersions(sources[key]).length === 0) {
+      throw new Error(`${path}: version-pinned install.sh URL not found`);
+    }
+  }
   if (!README_BADGE_RE.test(sources.readmeMd)) {
     throw new Error("README.md: version badge not found");
   }
-  const readmeMd = sources.readmeMd.replace(README_BADGE_RE, `$1${v}$3${v}$5`);
-
   if (!LANDING_JSONLD_RE.test(sources.landingHtml)) {
     throw new Error("landing/src/index.html: JSON-LD softwareVersion not found");
-  }
-  if (!LANDING_INSTALL_URL_RE.test(sources.landingHtml)) {
-    throw new Error("landing/src/index.html: version-pinned install.sh command not found");
   }
   if (!LANDING_FOOTER_RE.test(sources.landingHtml)) {
     throw new Error("landing/src/index.html: footer version not found");
   }
-  const landingHtml = sources.landingHtml
-    .replace(LANDING_JSONLD_RE, `$1${v}$3`)
-    .replace(LANDING_INSTALL_URL_RE, `$1${v}$3`)
-    .replace(LANDING_FOOTER_RE, `$1${v}$3`);
 
-  return { packageJson, readmeMd, landingHtml };
+  const pin = (_match: string, prefix: string, _old: string, suffix: string) => `${prefix}${v}${suffix}`;
+  const readmeMd = sources.readmeMd
+    .replace(README_BADGE_RE, (_m, a: string, _b: string, c: string, _d: string, e: string) => `${a}${v}${c}${v}${e}`)
+    .replace(INSTALL_URL_RE, pin);
+  const landingHtml = sources.landingHtml
+    .replace(LANDING_JSONLD_RE, pin)
+    .replace(INSTALL_URL_RE, pin)
+    .replace(LANDING_FOOTER_RE, pin);
+  const landingBuild = sources.landingBuild.replace(INSTALL_URL_RE, pin);
+
+  return { packageJson, readmeMd, landingHtml, landingBuild };
 }
 
 export function formatReleaseNotes(options: {
@@ -352,8 +374,8 @@ export const RELEASE_USAGE = [
   "Usage: bun run scripts/release.ts <command> [options]",
   "",
   "Commands:",
-  "  check [--tag <vX.Y.Z>]                  Verify version sync across package.json, README, landing page & CHANGELOG",
-  "  bump <X.Y.Z>                            Update version in package.json, README.md, and landing/src/index.html",
+  "  check [--tag <vX.Y.Z>]                  Verify version sync across package.json, README, landing page, llms.txt & CHANGELOG",
+  "  bump <X.Y.Z>                            Update version in package.json, README.md, landing/src/index.html, and landing/build.mjs",
   "  notes [--tag <vX.Y.Z>] [--out <file>]   Generate GitHub release notes from CHANGELOG.md",
   "  build [--target <list>] [--out-dir <d>] Cross-compile release binaries, package .tar.gz archives, and write SHA256SUMS.txt",
   "  publish [options]                       Verify, build all targets, tag, and publish the GitHub release via gh",
@@ -480,6 +502,7 @@ function readRepoSources(rootDir: string): VersionSources {
     packageJson: readFileSync(join(rootDir, "package.json"), "utf8"),
     readmeMd: readFileSync(join(rootDir, "README.md"), "utf8"),
     landingHtml: readFileSync(join(rootDir, "landing/src/index.html"), "utf8"),
+    landingBuild: readFileSync(join(rootDir, "landing/build.mjs"), "utf8"),
     changelogMd: readFileSync(join(rootDir, "CHANGELOG.md"), "utf8"),
   };
 }
@@ -636,6 +659,7 @@ async function main(argv: readonly string[]): Promise<number> {
       writeFileSync(join(rootDir, "package.json"), updated.packageJson);
       writeFileSync(join(rootDir, "README.md"), updated.readmeMd);
       writeFileSync(join(rootDir, "landing/src/index.html"), updated.landingHtml);
+      writeFileSync(join(rootDir, "landing/build.mjs"), updated.landingBuild);
       console.log(`Bumped version ${current} -> ${parsed.version}`);
       return 0;
     }
