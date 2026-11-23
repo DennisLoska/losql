@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { openSession, parseConnection } from "./connection";
 import { openPostgres, resolvePostgresTarget } from "./postgres";
-import { QueryError, type Driver } from "./types";
+import { QueryError, type Driver, type RelationDetails, type RelationRef } from "./types";
 
 const url = process.env.LOSQL_TEST_PG_URL;
 const suite = url ? describe : describe.skip;
@@ -885,4 +885,359 @@ describe("final-c2 fix 2: the Driver reports a main connection that was closed u
     // Closing the Driver is not a loss.
     expect(driver.takeLostConnection!()).toBe(false);
   });
+});
+
+/**
+ * Calls the optional `describeRelation` the way the app does, turning a missing method into a
+ * rejection instead of a synchronous throw so a red run still reaches its assertions.
+ */
+function callDescribe(
+  driver: Driver,
+  ref: RelationRef,
+  options?: { signal?: AbortSignal },
+): Promise<RelationDetails | null> {
+  return Promise.resolve().then(() => {
+    const describe = driver.describeRelation;
+    if (typeof describe !== "function") {
+      throw new TypeError("driver.describeRelation is not a function");
+    }
+    return describe.call(driver, ref, options);
+  });
+}
+
+suite("postgres relation details and the side queue", () => {
+  const schema = `losql_d_${Date.now().toString(36)}`;
+  const ref = (name: string): RelationRef => ({ namespace: schema, name });
+  let driver: Driver;
+
+  beforeAll(async () => {
+    driver = await openSession(parseConnection(url!));
+    await driver.run(`create schema ${schema}`);
+    await driver.run(`set search_path = ${schema}`);
+    await driver.run("create table parent (a int not null, b int not null, primary key (a, b))");
+    await driver.run(`create table child (
+      k1 int not null,
+      k2 int not null,
+      p_a int,
+      p_b int,
+      i_a int,
+      i_b int,
+      note text,
+      code text,
+      active boolean not null default true,
+      status text not null default 'open',
+      label text,
+      maybe int default null,
+      doubled int generated always as (p_a * 2) stored,
+      constraint child_pkey primary key (k1, k2),
+      constraint child_parent_explicit_fk foreign key (p_a, p_b)
+        references parent (a, b) on delete cascade on update restrict,
+      constraint child_parent_implicit_fk foreign key (i_a, i_b) references parent,
+      constraint child_code_unique unique (code, k1),
+      constraint child_active_check check (active = true)
+    )`);
+    await driver.run(
+      "create unique index child_expr_idx on child (lower(code), p_a) include (note) where active = true",
+    );
+    await driver.run("create view child_view as select k1, code from child where active");
+    await driver.run("create materialized view child_mv as select k1, note from child");
+  });
+
+  afterAll(async () => {
+    await driver.run(`drop schema ${schema} cascade`);
+    await driver.close();
+  });
+
+  test("describeRelation returns columns in attnum order with defaults, generated expressions and foreign keys", async () => {
+    expect(typeof driver.describeRelation).toBe("function");
+
+    const details = await callDescribe(driver, ref("child"));
+    expect(details).not.toBeNull();
+    expect(details!.namespace).toBe(schema);
+    expect(details!.name).toBe("child");
+    expect(details!.kind).toBe("table");
+
+    const columns = details!.columns;
+    expect(columns.map((c) => c.name)).toEqual([
+      "k1",
+      "k2",
+      "p_a",
+      "p_b",
+      "i_a",
+      "i_b",
+      "note",
+      "code",
+      "active",
+      "status",
+      "label",
+      "maybe",
+      "doubled",
+    ]);
+
+    const byName = new Map(columns.map((c) => [c.name, c]));
+
+    expect(byName.get("k1")).toMatchObject({ type: "integer", nullable: false, primaryKeyPosition: 1 });
+    expect(byName.get("k2")).toMatchObject({ type: "integer", nullable: false, primaryKeyPosition: 2 });
+    expect(byName.get("p_a")).toMatchObject({ type: "integer", nullable: true });
+    expect(byName.get("p_a")!.primaryKeyPosition).toBeUndefined();
+    expect(byName.get("note")!.type).toBe("text");
+    expect(byName.get("code")!.type).toBe("text");
+
+    // A non-null DEFAULT is a default, never a generated expression.
+    expect(byName.get("active")).toMatchObject({ type: "boolean", nullable: false });
+    expect(byName.get("active")!.defaultValue).toContain("true");
+    expect(byName.get("active")!.generated).toBeUndefined();
+    expect(byName.get("status")!.type).toBe("text");
+    expect(byName.get("status")!.defaultValue).toContain("open");
+    expect(byName.get("status")!.generated).toBeUndefined();
+
+    // No declared default at all.
+    expect(byName.get("label")!.type).toBe("text");
+    expect(byName.get("label")!.defaultValue).toBeUndefined();
+    expect(byName.get("label")!.generated).toBeUndefined();
+
+    // DEFAULT NULL may be normalized away by the server or kept as "NULL"; it is never generated.
+    const maybeDefault = byName.get("maybe")!.defaultValue;
+    expect(maybeDefault === undefined || maybeDefault === "NULL").toBe(true);
+    expect(byName.get("maybe")!.generated).toBeUndefined();
+
+    // GENERATED ALWAYS AS (...) STORED: an expression or kind, never a default.
+    const generated = byName.get("doubled")!.generated;
+    expect(typeof generated).toBe("string");
+    expect(String(generated).toLowerCase()).toMatch(/p_a|stored|^s$/);
+    expect(byName.get("doubled")!.defaultValue).toBeUndefined();
+
+    // Per-column foreign key references, ordered and carrying actions and constraint names.
+    expect(byName.get("k1")!.references).toEqual([]);
+    const pARefs = byName.get("p_a")!.references;
+    expect(pARefs).toHaveLength(1);
+    expect(pARefs[0]).toMatchObject({
+      namespace: schema,
+      relation: "parent",
+      column: "a",
+      constraintName: "child_parent_explicit_fk",
+      onDelete: "CASCADE",
+      onUpdate: "RESTRICT",
+    });
+    expect(byName.get("p_b")!.references[0]).toMatchObject({
+      namespace: schema,
+      relation: "parent",
+      column: "b",
+      constraintName: "child_parent_explicit_fk",
+      onDelete: "CASCADE",
+      onUpdate: "RESTRICT",
+    });
+    expect(byName.get("i_a")!.references[0]).toMatchObject({
+      namespace: schema,
+      relation: "parent",
+      column: "a",
+      constraintName: "child_parent_implicit_fk",
+      onDelete: "NO ACTION",
+      onUpdate: "NO ACTION",
+    });
+    expect(byName.get("i_b")!.references[0]).toMatchObject({
+      namespace: schema,
+      relation: "parent",
+      column: "b",
+      constraintName: "child_parent_implicit_fk",
+      onDelete: "NO ACTION",
+      onUpdate: "NO ACTION",
+    });
+  }, 20000);
+
+  test("describeRelation separates primary, unique and expression/partial/INCLUDE index metadata", async () => {
+    const details = await callDescribe(driver, ref("child"));
+    expect(details).not.toBeNull();
+    const indexes = details!.indexes;
+    expect(indexes).toBeDefined();
+
+    const primaryIndex = indexes!.find((i) => i.primary === true);
+    expect(primaryIndex).toBeDefined();
+    expect(primaryIndex!.unique).toBe(true);
+    expect(primaryIndex!.name).toBe("child_pkey");
+    expect(primaryIndex!.columns).toEqual(["k1", "k2"]);
+
+    const uniqueIndex = indexes!.find((i) => i.name === "child_code_unique");
+    expect(uniqueIndex).toBeDefined();
+    expect(uniqueIndex!.unique).toBe(true);
+    expect(uniqueIndex!.primary).toBe(false);
+    expect(uniqueIndex!.columns).toEqual(["code", "k1"]);
+
+    const expressionIndex = indexes!.find((i) => i.name === "child_expr_idx");
+    expect(expressionIndex).toBeDefined();
+    expect(expressionIndex!.unique).toBe(true);
+    expect(expressionIndex!.primary).toBe(false);
+    expect(expressionIndex!.method).toBe("btree");
+    expect(expressionIndex!.columns).toHaveLength(2);
+    expect(expressionIndex!.columns[0]).toContain("lower");
+    expect(expressionIndex!.columns[0]).toContain("code");
+    expect(expressionIndex!.columns[1]).toBe("p_a");
+    expect(expressionIndex!.includedColumns).toEqual(["note"]);
+    expect(expressionIndex!.predicate).toContain("active");
+    expect(expressionIndex!.definition).toContain("CREATE UNIQUE INDEX");
+  }, 20000);
+
+  test("describeRelation reports primary, unique, foreign key and check constraints in order", async () => {
+    const details = await callDescribe(driver, ref("child"));
+    expect(details).not.toBeNull();
+    const constraints = details!.constraints;
+    expect(constraints).toBeDefined();
+
+    const primaryKey = constraints!.find((c) => c.kind === "PRIMARY KEY");
+    expect(primaryKey).toBeDefined();
+    expect(primaryKey!.columns).toEqual(["k1", "k2"]);
+
+    const unique = constraints!.find((c) => c.kind === "UNIQUE");
+    expect(unique).toBeDefined();
+    expect(unique!.name).toBe("child_code_unique");
+    expect(unique!.columns).toEqual(["code", "k1"]);
+
+    const explicitFk = constraints!.find((c) => c.name === "child_parent_explicit_fk");
+    expect(explicitFk).toBeDefined();
+    expect(explicitFk!.kind).toBe("FOREIGN KEY");
+    expect(explicitFk!.columns).toEqual(["p_a", "p_b"]);
+    expect(explicitFk!.references).toMatchObject({
+      namespace: schema,
+      relation: "parent",
+      columns: ["a", "b"],
+      onDelete: "CASCADE",
+      onUpdate: "RESTRICT",
+    });
+
+    const implicitFk = constraints!.find((c) => c.name === "child_parent_implicit_fk");
+    expect(implicitFk).toBeDefined();
+    expect(implicitFk!.kind).toBe("FOREIGN KEY");
+    expect(implicitFk!.columns).toEqual(["i_a", "i_b"]);
+    expect(implicitFk!.references).toMatchObject({
+      namespace: schema,
+      relation: "parent",
+      columns: ["a", "b"],
+      onDelete: "NO ACTION",
+      onUpdate: "NO ACTION",
+    });
+
+    const check = constraints!.find((c) => c.kind === "CHECK");
+    expect(check).toBeDefined();
+    expect(check!.name).toBe("child_active_check");
+    expect(check!.definition).toContain("active");
+  }, 20000);
+
+  test("describeRelation describes views and materialized views and returns null for missing relations", async () => {
+    const view = await callDescribe(driver, ref("child_view"));
+    expect(view).not.toBeNull();
+    expect(view!.namespace).toBe(schema);
+    expect(view!.name).toBe("child_view");
+    expect(view!.kind).toBe("view");
+    expect(view!.columns.map((c) => c.name)).toEqual(["k1", "code"]);
+    expect(view!.columns.map((c) => c.type)).toEqual(["integer", "text"]);
+    expect(typeof view!.definition).toBe("string");
+    expect(view!.definition!.toLowerCase()).toContain("select");
+
+    const materializedView = await callDescribe(driver, ref("child_mv"));
+    expect(materializedView).not.toBeNull();
+    expect(materializedView!.name).toBe("child_mv");
+    expect(materializedView!.kind).toBe("view");
+    expect(materializedView!.columns.map((c) => c.name)).toEqual(["k1", "note"]);
+    expect(materializedView!.columns.map((c) => c.type)).toEqual(["integer", "text"]);
+    expect(typeof materializedView!.definition).toBe("string");
+    expect(materializedView!.definition!.toLowerCase()).toContain("select");
+
+    expect(await callDescribe(driver, ref("no_such_relation"))).toBeNull();
+    expect(await callDescribe(driver, { namespace: `${schema}_missing`, name: "child" })).toBeNull();
+  }, 20000);
+
+  test("a read-only Run returning an unseeded type overlaps schema() and describeRelation() without interleaving", async () => {
+    const id = "11111111-1111-1111-1111-111111111111";
+    const [readOnlyRun, snapshot, details] = await Promise.all([
+      driver.run(`select array['${id}']::uuid[] as ids`, { readOnly: true }),
+      driver.schema(),
+      callDescribe(driver, ref("child")),
+    ]);
+
+    expect(readOnlyRun.columns.map((c) => c.name)).toEqual(["ids"]);
+    expect(readOnlyRun.rows).toHaveLength(1);
+    expect(String(readOnlyRun.rows[0]![0])).toContain(id);
+
+    expect(snapshot.dialect).toBe("postgres");
+    expect(snapshot.namespaces.find((n) => n.name === schema)).toBeDefined();
+
+    expect(details).not.toBeNull();
+    expect(details!.name).toBe("child");
+    expect(details!.columns.map((c) => c.name)).toContain("doubled");
+
+    // No leaked transaction, timeout or advisory-lock state: the side client is still usable.
+    expect((await driver.run("select 1 as ok", { readOnly: true })).rows).toEqual([[1]]);
+    expect((await callDescribe(driver, ref("child")))!.name).toBe("child");
+  }, 20000);
+
+  test("a queued describeRelation() aborts while a read-only Run holds the side client, and the next queued operation still runs", async () => {
+    const controller = new AbortController();
+    let holderSettled = false;
+    let holderError: unknown = null;
+    const holder = driver
+      .run("select pg_advisory_lock(91), pg_sleep(1.5)", { readOnly: true })
+      .then(
+        () => {
+          holderSettled = true;
+        },
+        (e) => {
+          holderSettled = true;
+          holderError = e;
+        },
+      );
+
+    const startedAt = performance.now();
+    const aborted = callDescribe(driver, ref("child"), { signal: controller.signal }).then(
+      () => null,
+      (e) => e,
+    );
+    const queuedSchema = driver.schema();
+    setTimeout(() => controller.abort(), 200);
+
+    const abortError = await aborted;
+    const abortedAfterMs = performance.now() - startedAt;
+    expect(abortError).toBeInstanceOf(QueryError);
+    expect(abortedAfterMs).toBeLessThan(1000);
+    expect(holderSettled).toBe(false);
+
+    await holder;
+    expect(holderError).toBeNull();
+    const snapshot = await queuedSchema;
+    expect(snapshot.namespaces.find((n) => n.name === schema)).toBeDefined();
+    expect((await driver.run("select 1 as ok", { readOnly: true })).rows).toEqual([[1]]);
+  }, 20000);
+
+  test("close() rejects queued describeRelation() and schema() callers with a closed-Session QueryError", async () => {
+    const session = await openSession(parseConnection(url!));
+    const startedAt = performance.now();
+    const holder = session.run("select pg_sleep(10)", { readOnly: true }).then(
+      () => null,
+      (e) => e,
+    );
+    const queuedDescribe = callDescribe(session, ref("child")).then(
+      () => null,
+      (e) => e,
+    );
+    const queuedSchema = session.schema().then(
+      () => null,
+      (e) => e,
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    await session.close();
+
+    const [holderError, describeError, schemaError] = await Promise.all([
+      holder,
+      queuedDescribe,
+      queuedSchema,
+    ]);
+    const settledAfterMs = performance.now() - startedAt;
+
+    expect(holderError).toBeInstanceOf(QueryError);
+    expect(describeError).toBeInstanceOf(QueryError);
+    expect(describeError.message).toBe("the Session is closed");
+    expect(schemaError).toBeInstanceOf(QueryError);
+    expect(schemaError.message).toBe("the Session is closed");
+    expect(settledAfterMs).toBeLessThan(3000);
+  }, 20000);
 });
