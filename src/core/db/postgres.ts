@@ -654,8 +654,10 @@ export async function openPostgres(
 
   /**
    * Fills the type name cache for a read-only Run's `oids`. Called only outside a `withSide` slot
-   * (the queue is not reentrant), and takes its own short slot only on a cache miss. The wait for
-   * that slot ends at `deadline` (the Run's timeout budget) with the statement-timeout QueryError.
+   * (the queue is not reentrant), and takes its own short slot only on a cache miss. Both the wait
+   * for that slot and the lookup itself end at `deadline` (the Run's timeout budget): the caller is
+   * rejected at once with the statement-timeout QueryError and an in-flight lookup is canceled,
+   * while the slot stays held until that lookup actually settles.
    */
   async function resolveTypeNames(
     oids: number[],
@@ -664,12 +666,32 @@ export async function openPostgres(
   ): Promise<void> {
     if (oids.every((oid) => typeNames.has(oid))) return;
 
-    let timeoutMs: number | undefined;
-    if (deadline !== undefined) {
-      timeoutMs = deadline - performance.now();
-      if (timeoutMs <= 0) throw statementTimeoutError();
+    if (deadline === undefined) {
+      await withSide(() => lookupTypeNames(oids, signal), { signal });
+      return;
     }
-    await withSide(() => lookupTypeNames(oids, signal), { signal, timeoutMs });
+
+    const timeoutMs = deadline - performance.now();
+    if (timeoutMs <= 0) throw statementTimeoutError();
+
+    const expiry = new AbortController();
+    const lookupSignal = signal ? AbortSignal.any([signal, expiry.signal]) : expiry.signal;
+    const lookup = withSide(() => lookupTypeNames(oids, lookupSignal), { signal, timeoutMs });
+    // The deadline may win the race; the lookup's own outcome is then no longer awaited.
+    lookup.catch(() => {});
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const expired = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        expiry.abort();
+        reject(statementTimeoutError());
+      }, timeoutMs);
+    });
+    try {
+      await Promise.race([lookup, expired]);
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   /**

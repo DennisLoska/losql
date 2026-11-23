@@ -1237,6 +1237,63 @@ suite("postgres relation details and the side queue", () => {
     }
   }, 20000);
 
+  test("a read-only Run's in-flight type-name lookup is canceled at its timeoutMs and the side client stays usable", async () => {
+    // A fresh Session; its warm-up Run fills the side backend's catalog cache for the statements
+    // around a read-only Run, so only the pg_type lookup itself waits for the lock below.
+    const session = await openSession(parseConnection(url!));
+    const locker = await openSession(parseConnection(url!));
+    let lockHeld = false;
+    try {
+      await session.run("select '1.2.3.4'::inet as addr", { readOnly: true });
+
+      const startedAt = performance.now();
+      const timed = session
+        .run("select pg_sleep(0.3), '08:00:2b:01:02:03'::macaddr as mac", {
+          readOnly: true,
+          timeoutMs: 800,
+        })
+        .then(
+          (result) => ({ result, error: null as unknown, at: performance.now() - startedAt }),
+          (error) => ({ result: null, error, at: performance.now() - startedAt }),
+        );
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      // Taken after the Run's statement was parsed: its type-name lookup on pg_type now blocks.
+      await locker.run("begin");
+      lockHeld = true;
+      await locker.run("lock table pg_catalog.pg_type in access exclusive mode");
+
+      const outcome = await Promise.race([
+        timed,
+        new Promise<"hung">((resolve) => setTimeout(() => resolve("hung"), 3000)),
+      ]);
+      expect(outcome).not.toBe("hung");
+      const settled = outcome as Exclude<typeof outcome, "hung">;
+      expect(settled.result).toBeNull();
+      expect(settled.error).toBeInstanceOf(QueryError);
+      expect((settled.error as QueryError).code).toBe("57014");
+      expect((settled.error as QueryError).message).toContain("statement timeout");
+      expect(settled.at).toBeLessThan(1300);
+
+      // The lookup was canceled, so the side client is free while pg_type is still locked.
+      const next = await Promise.race([
+        session.run("select 1 as ok", { readOnly: true }),
+        new Promise<"hung">((resolve) => setTimeout(() => resolve("hung"), 3000)),
+      ]);
+      expect(next).not.toBe("hung");
+      expect((next as Awaited<ReturnType<Driver["run"]>>).rows).toEqual([[1]]);
+
+      await locker.run("rollback");
+      lockHeld = false;
+      const later = await session.run("select '08:00:2b:01:02:04'::macaddr as mac", { readOnly: true });
+      expect(later.columns).toEqual([{ name: "mac", type: "macaddr" }]);
+      expect(later.rows).toEqual([["08:00:2b:01:02:04"]]);
+    } finally {
+      if (lockHeld) await locker.run("rollback").catch(() => {});
+      await locker.close();
+      await session.close();
+    }
+  }, 20000);
+
   test("a user-connection Run with an uncached type does not wait for a side client blocked by its own transaction", async () => {
     await driver.run(`create table ${schema}.locked_by_user (id int)`);
     // A fresh Session, so `inet` is not in its type name cache yet.
