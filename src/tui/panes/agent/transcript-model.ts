@@ -2,6 +2,7 @@ import type { StepRecord } from "../../../core/agent/loop";
 import type { ProviderErrorKind } from "../../../core/agent/run";
 import type { TurnView } from "../../context/agent";
 import { cellWidth, cutCells } from "../../ui/cells";
+import { keyLabel } from "../../ui/key-label";
 import { segmentGraphemes } from "../../ui/line-input";
 import { printable } from "../../ui/printable";
 
@@ -9,7 +10,7 @@ export type TranscriptLine =
   | { kind: "user"; text: string; pad?: true; turnId: number }
   | { kind: "label"; who: "agent"; turnId: number }
   | { kind: "text"; text: string; tone: "normal" | "muted" | "error"; turnId: number }
-  | { kind: "step"; text: string; turnId: number }
+  | { kind: "step"; text: string; tone: "muted" | "error"; turnId: number }
   | {
       kind: "sql";
       text: string;
@@ -18,6 +19,7 @@ export type TranscriptLine =
       /** Set by the model on a row that continues the SQL line above; its text starts with `↪ `. */
       continuation?: true;
     }
+  | { kind: "proposal-header"; text: string; turnId: number; proposalId: number }
   | { kind: "hint"; text: string; turnId: number; proposalId: number }
   | { kind: "status"; activity: "thinking" | "querying"; turnId: number }
   | { kind: "blank" };
@@ -146,105 +148,101 @@ function cutToCells(text: string, maxCells: number): string {
   return cutCells(text, maxCells, { ellipsis: true });
 }
 
+function oneLine(text: string): string {
+  return printable(text).replace(/\s+/g, " ").trim();
+}
+
+/**
+ * The error a Step's payload reports, cleaned to one line, or null when it reports none. A payload
+ * that is not JSON is an error for the Steps whose payload is always JSON (query, explain,
+ * read_results).
+ */
+function stepError(step: StepRecord): string | null {
+  const action = step.action.action;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(step.result);
+  } catch {
+    if (action === "query" || action === "explain" || action === "read_results") {
+      return oneLine(step.result);
+    }
+    return null;
+  }
+  const obj = asObject(parsed);
+  if (obj === null || obj.error === undefined || obj.error === null) return null;
+  return oneLine(typeof obj.error === "string" ? obj.error : JSON.stringify(obj.error));
+}
+
+function asObject(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+/** The Step's payload as a JSON object, or null when it is not one. */
+function payloadObject(result: string): Record<string, unknown> | null {
+  try {
+    return asObject(JSON.parse(result));
+  } catch {
+    return null;
+  }
+}
+
+/** True when a Step's payload is an error; its row is then drawn in the error colour. */
+export function stepFailed(step: StepRecord): boolean {
+  return stepError(step) !== null;
+}
+
+/** `prefix + body + suffix`, cutting the body first so the outcome stays visible. */
+function fitSummary(prefix: string, body: string, suffix: string, maxWidth: number): string {
+  const full = `${prefix}${body}${suffix}`;
+  if (cellWidth(full) <= maxWidth) return full;
+  const bodyBudget = maxWidth - cellWidth(prefix) - cellWidth(suffix);
+  if (bodyBudget >= 1) return `${prefix}${cutToCells(body, bodyBudget)}${suffix}`;
+  return cutToCells(full, maxWidth);
+}
+
 export function stepSummary(step: StepRecord, width: number): string {
   const maxWidth = Math.max(1, width);
+  const error = stepError(step);
+  const errorSuffix = error !== null ? `  → error: ${error}` : "";
   if (step.action.action === "describe") {
     const names = step.action.relations.map((r) => printable(r)).join(", ");
-    return cutToCells(`▸ describe  ${names}`, maxWidth);
+    return fitSummary("▸ describe  ", names, errorSuffix, maxWidth);
   }
   if (step.action.action === "query") {
-    const oneLineSql = printable(step.action.sql).replace(/\s+/g, " ").trim();
     let outcome = "0 rows";
-    try {
-      const parsed: unknown = JSON.parse(step.result);
-      if (typeof parsed === "object" && parsed !== null) {
-        const obj = parsed as Record<string, unknown>;
-        if (typeof obj.error === "string") {
-          const cleanErr = printable(obj.error).replace(/\s+/g, " ").trim();
-          outcome = `error: ${cleanErr}`;
-        } else if (Array.isArray(obj.rows)) {
-          const n = obj.rows.length;
-          const truncated = obj.truncated === true;
-          if (truncated) {
-            outcome = `${n}+ rows`;
-          } else {
-            outcome = n === 1 ? "1 row" : `${n} rows`;
-          }
-        }
+    if (error !== null) {
+      outcome = `error: ${error}`;
+    } else {
+      const obj = payloadObject(step.result);
+      if (obj !== null && Array.isArray(obj.rows)) {
+        const n = obj.rows.length;
+        outcome = obj.truncated === true ? `${n}+ rows` : n === 1 ? "1 row" : `${n} rows`;
       }
-    } catch {
-      outcome = `error: ${printable(step.result).replace(/\s+/g, " ").trim()}`;
     }
-
-    const prefix = "▸ query  ";
-    const suffix = `  → ${outcome}`;
-    const full = `${prefix}${oneLineSql}${suffix}`;
-    if (cellWidth(full) <= maxWidth) {
-      return full;
-    }
-
-    const prefixW = cellWidth(prefix);
-    const suffixW = cellWidth(suffix);
-    const sqlBudget = maxWidth - prefixW - suffixW;
-    if (sqlBudget >= 1) {
-      return `${prefix}${cutToCells(oneLineSql, sqlBudget)}${suffix}`;
-    }
-    return cutToCells(full, maxWidth);
+    return fitSummary("▸ query  ", oneLine(step.action.sql), `  → ${outcome}`, maxWidth);
   }
   if (step.action.action === "explain") {
-    const oneLineSql = printable(step.action.sql).replace(/\s+/g, " ").trim();
-    let outcome = "plan";
-    try {
-      const parsed: unknown = JSON.parse(step.result);
-      if (typeof parsed === "object" && parsed !== null) {
-        const obj = parsed as Record<string, unknown>;
-        if (typeof obj.error === "string") {
-          const cleanErr = printable(obj.error).replace(/\s+/g, " ").trim();
-          outcome = `error: ${cleanErr}`;
-        }
-      }
-    } catch {
-      outcome = `error: ${printable(step.result).replace(/\s+/g, " ").trim()}`;
-    }
-
-    const prefix = "▸ explain  ";
-    const suffix = `  → ${outcome}`;
-    const full = `${prefix}${oneLineSql}${suffix}`;
-    if (cellWidth(full) <= maxWidth) {
-      return full;
-    }
-
-    const prefixW = cellWidth(prefix);
-    const suffixW = cellWidth(suffix);
-    const sqlBudget = maxWidth - prefixW - suffixW;
-    if (sqlBudget >= 1) {
-      return `${prefix}${cutToCells(oneLineSql, sqlBudget)}${suffix}`;
-    }
-    return cutToCells(full, maxWidth);
+    const outcome = error !== null ? `error: ${error}` : "plan";
+    return fitSummary("▸ explain  ", oneLine(step.action.sql), `  → ${outcome}`, maxWidth);
   }
   if (step.action.action === "read_buffer") {
     const target = step.action.name ? printable(step.action.name) : "open buffers";
-    return cutToCells(`▸ buffer  ${target}`, maxWidth);
+    return fitSummary("▸ buffer  ", target, errorSuffix, maxWidth);
   }
   if (step.action.action === "read_results") {
     let outcome = "empty";
-    try {
-      const parsed: unknown = JSON.parse(step.result);
-      if (typeof parsed === "object" && parsed !== null) {
-        const obj = parsed as Record<string, unknown>;
-        if (typeof obj.error === "string") {
-          const cleanErr = printable(obj.error).replace(/\s+/g, " ").trim();
-          outcome = `error: ${cleanErr}`;
-        } else if (obj.shown === null) {
-          outcome = "empty";
-        } else if (Array.isArray(obj.rows)) {
-          const n = obj.rows.length;
-          const truncated = obj.truncated === true;
-          outcome = truncated ? `${n}+ rows` : n === 1 ? "1 row" : `${n} rows`;
-        }
+    if (error !== null) {
+      outcome = `error: ${error}`;
+    } else {
+      const obj = payloadObject(step.result);
+      if (obj === null || obj.shown === null) {
+        outcome = "empty";
+      } else if (Array.isArray(obj.rows)) {
+        const n = obj.rows.length;
+        outcome = obj.truncated === true ? `${n}+ rows` : n === 1 ? "1 row" : `${n} rows`;
       }
-    } catch {
-      outcome = `error: ${printable(step.result).replace(/\s+/g, " ").trim()}`;
     }
     return cutToCells(`▸ results  ${outcome}`, maxWidth);
   }
@@ -254,28 +252,34 @@ export function stepSummary(step: StepRecord, width: number): string {
 export function errorAdvice(
   kind: ProviderErrorKind | "protocol",
   provider: { label: string; binary: string; installHint: string } | null,
+  leader = "space",
 ): string {
   if (kind === "cancelled" || kind === "other") return "";
   if (kind === "protocol") {
-    return "The reply could not be understood. Try again, or pick another model with space m.";
+    return `The reply could not be understood. Try again, or pick another model with ${keyLabel("m", leader)}.`;
   }
   if (!provider) return "";
   if (kind === "auth") {
     return `Run \`${printable(provider.binary)}\` once in a terminal to log in, then try again.`;
   }
   if (kind === "quota") {
-    return `${printable(provider.label)} has reached its usage limit. Try again later or switch provider with space p.`;
+    return `${printable(provider.label)} has reached its usage limit. Try again later or switch provider with ${keyLabel("p", leader)}.`;
   }
   if (kind === "missing") {
     return printable(provider.installHint);
   }
   if (kind === "timeout") {
-    return `${printable(provider.label)} did not answer in time. Try again, or pick a faster model with space m.`;
+    return `${printable(provider.label)} did not answer in time. Try again, or pick a faster model with ${keyLabel("m", leader)}.`;
   }
   return "";
 }
 
 const MAX_SQL_CARD_ROWS = 60;
+
+/** The plain cells left of a SQL card: two when the Transcript has room for them, none otherwise. */
+export function sqlCardInset(width: number): number {
+  return width >= 12 ? 2 : 0;
+}
 const CONTINUATION_MARKER = "↪ ";
 const CONTINUATION_MARKER_WIDTH = 2;
 /** How a real SQL line that starts with `↪` shows that character, so it cannot be taken for the marker. */
@@ -421,6 +425,7 @@ export function turnTranscriptLines(
   turn: TurnView,
   width: number,
   provider: { label: string; binary: string; installHint: string } | null,
+  leader = "space",
 ): TranscriptLine[] {
   const out: TranscriptLine[] = [];
   const userWidth = Math.max(1, width - 3);
@@ -433,9 +438,16 @@ export function turnTranscriptLines(
   out.push({ kind: "label", who: "agent", turnId: turn.id });
 
   for (const step of turn.steps) {
-    out.push({ kind: "step", text: stepSummary(step, width), turnId: turn.id });
+    out.push({
+      kind: "step",
+      text: stepSummary(step, width),
+      tone: stepFailed(step) ? "error" : "muted",
+      turnId: turn.id,
+    });
   }
 
+  const sqlWidth = Math.max(1, width - sqlCardInset(width));
+  const content: TranscriptLine[] = [];
   if (turn.status === "running") {
     out.push({
       kind: "status",
@@ -447,16 +459,22 @@ export function turnTranscriptLines(
       for (const part of splitMessage(turn.message)) {
         if (part.kind === "text") {
           for (const line of wrapText(part.text, width)) {
-            out.push({ kind: "text", text: line, tone: "normal", turnId: turn.id });
+            content.push({ kind: "text", text: line, tone: "normal", turnId: turn.id });
           }
         } else {
-          appendSqlLines(out, part.text, width, turn.id, null);
+          appendSqlLines(content, part.text, sqlWidth, turn.id, null);
         }
       }
     }
     if (turn.proposal !== null) {
-      appendSqlLines(out, turn.proposal.sql, width, turn.id, turn.proposal.id);
-      out.push({
+      content.push({
+        kind: "proposal-header",
+        text: "SQL Proposal",
+        turnId: turn.id,
+        proposalId: turn.proposal.id,
+      });
+      appendSqlLines(content, turn.proposal.sql, sqlWidth, turn.id, turn.proposal.id);
+      content.push({
         kind: "hint",
         text: "enter accept  r run  y yank",
         turnId: turn.id,
@@ -466,21 +484,25 @@ export function turnTranscriptLines(
   } else if (turn.status === "error") {
     if (turn.message !== null && turn.message.length > 0) {
       for (const line of wrapText(turn.message, width)) {
-        out.push({ kind: "text", text: line, tone: "error", turnId: turn.id });
+        content.push({ kind: "text", text: line, tone: "error", turnId: turn.id });
       }
     }
     if (turn.errorKind !== null) {
-      const advice = errorAdvice(turn.errorKind, provider);
+      const advice = errorAdvice(turn.errorKind, provider, leader);
       if (advice.length > 0) {
         for (const line of wrapText(advice, width)) {
-          out.push({ kind: "text", text: line, tone: "muted", turnId: turn.id });
+          content.push({ kind: "text", text: line, tone: "muted", turnId: turn.id });
         }
       }
     }
   } else if (turn.status === "cancelled") {
-    out.push({ kind: "text", text: "Cancelled.", tone: "muted", turnId: turn.id });
+    content.push({ kind: "text", text: "Cancelled.", tone: "muted", turnId: turn.id });
   }
 
+  if (turn.steps.length > 0 && content.length > 0) {
+    out.push({ kind: "blank" });
+  }
+  out.push(...content);
   out.push({ kind: "blank" });
   return out;
 }
@@ -489,10 +511,11 @@ export function transcriptLines(
   turns: TurnView[],
   width: number,
   provider: { label: string; binary: string; installHint: string } | null,
+  leader = "space",
 ): TranscriptLine[] {
   const out: TranscriptLine[] = [];
   for (const turn of turns) {
-    out.push(...turnTranscriptLines(turn, width, provider));
+    out.push(...turnTranscriptLines(turn, width, provider, leader));
   }
   return out;
 }

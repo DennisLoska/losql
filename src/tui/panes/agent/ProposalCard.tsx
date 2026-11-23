@@ -1,4 +1,5 @@
-import { createMemo, For, type JSX } from "solid-js";
+import { TextAttributes } from "@opentui/core";
+import { createMemo, For, type JSX, Match, Show, Switch } from "solid-js";
 import { highlightSql, type SyntaxRole } from "../../../core/sql/highlight";
 import type { ThemeToken } from "../../../core/theme/tokens";
 import { useTheme } from "../../context/theme";
@@ -108,16 +109,20 @@ export function highlightSqlCardRows(
   return result;
 }
 
+/**
+ * One row of a SQL card, after `inset` plain cells: the Proposal header, a SQL row on the card
+ * surface, or the Proposal's hint. A selected Proposal is drawn in the accent colour on the
+ * selection surface; fenced SQL in prose is never selected.
+ */
 export function ProposalCardLine(props: {
-  kind: "sql" | "hint";
+  kind: "header" | "sql" | "hint";
   text: string;
+  inset: number;
   continuation?: boolean;
   pieces?: SqlHighlightPiece[];
   selected: boolean;
-  turnBarColor: ReturnType<ReturnType<typeof useTheme>["color"]>;
 }): JSX.Element {
   const theme = useTheme();
-  const barColor = () => (props.selected ? theme.color("accent") : props.turnBarColor);
   const resolvedPieces = createMemo<SqlHighlightPiece[]>(() => {
     if (props.pieces) return props.pieces;
     return highlightSqlCardRows([{ text: props.text, continuation: props.continuation }])[0] ?? [];
@@ -125,30 +130,48 @@ export function ProposalCardLine(props: {
 
   return (
     <box height={1} width="100%" flexShrink={0} flexDirection="row" overflow="hidden">
-      <text fg={barColor()} flexShrink={0}>
-        {"┃ "}
-      </text>
-      {props.kind === "sql" ? (
-        <box
-          flexGrow={1}
-          flexShrink={1}
-          height={1}
-          backgroundColor={theme.color("backgroundElement")}
-          flexDirection="row"
-          overflow="hidden"
-        >
-          <text fg={theme.color("text")} wrapMode="none" flexShrink={0}>
-            <For each={resolvedPieces()}>
-              {(piece) => <span style={{ fg: theme.color(piece.token) }}>{piece.text}</span>}
-            </For>
-          </text>
-        </box>
-      ) : (
-        <text fg={theme.color("textMuted")} wrapMode="none" flexShrink={0}>
-          {printable(props.text)}
+      <Show when={props.inset > 0}>
+        <text flexShrink={0} wrapMode="none">
+          {" ".repeat(props.inset)}
         </text>
-      )}
+      </Show>
+      <Switch>
+        <Match when={props.kind === "sql"}>
+          <box
+            flexGrow={1}
+            flexShrink={1}
+            height={1}
+            backgroundColor={props.selected ? theme.color("selection") : theme.color("backgroundElement")}
+            flexDirection="row"
+            overflow="hidden"
+          >
+            <text fg={theme.color("text")} wrapMode="none" flexShrink={0}>
+              <For each={resolvedPieces()}>
+                {(piece) => <span style={{ fg: theme.color(piece.token) }}>{piece.text}</span>}
+              </For>
+            </text>
+          </box>
+        </Match>
+        <Match when={props.kind === "header"}>
+          <text
+            fg={props.selected ? theme.color("accent") : theme.color("textMuted")}
+            attributes={props.selected ? TextAttributes.BOLD : TextAttributes.NONE}
+            wrapMode="none"
+            flexShrink={0}
+          >
+            {props.selected ? `▸ ${printable(props.text)}` : printable(props.text)}
+          </text>
+        </Match>
+        <Match when={props.kind === "hint"}>
+          <text
+            fg={props.selected ? theme.color("accent") : theme.color("textMuted")}
+            wrapMode="none"
+            flexShrink={0}
+          >
+            {printable(props.text)}
+          </text>
+        </Match>
+      </Switch>
     </box>
   );
 }
-

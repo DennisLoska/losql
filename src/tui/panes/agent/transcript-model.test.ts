@@ -47,6 +47,13 @@ describe("stepSummary", () => {
     expect(stepSummary({ action: { action: "describe", relations: ["orders", "customers"] }, result: "..." }, 80)).toBe("▸ describe  orders, customers");
   });
 
+  test("a describe that failed says so in its summary", () => {
+    expect(stepSummary({ action: { action: "describe", relations: ["nope"] }, result: '{"error":"no relation named nope"}' }, 80))
+      .toBe("▸ describe  nope  → error: no relation named nope");
+    expect(stepSummary({ action: { action: "describe", relations: ["orders"] }, result: '{"error":"details unavailable"}' }, 80))
+      .toBe("▸ describe  orders  → error: details unavailable");
+  });
+
   test("explain, read_buffer and read_results", () => {
     expect(stepSummary({ action: { action: "explain", sql: "select * from orders" }, result: '{"columns":["detail"],"rows":[["SCAN orders"]],"truncated":false}' }, 80))
       .toBe("▸ explain  select * from orders  → plan");
@@ -69,13 +76,20 @@ test("errorAdvice tells the user what to do", () => {
   expect(errorAdvice("other", null)).toBe("");
 });
 
+test("errorAdvice writes the m and p shortcuts with the configured Leader", () => {
+  expect(errorAdvice("quota", claude, ",")).toBe("Claude Code has reached its usage limit. Try again later or switch provider with , p.");
+  expect(errorAdvice("timeout", claude, ";")).toBe("Claude Code did not answer in time. Try again, or pick a faster model with ; m.");
+  expect(errorAdvice("protocol", claude, "$")).toBe("The reply could not be understood. Try again, or pick another model with $ m.");
+  expect(errorAdvice("cancelled", claude, ",")).toBe("");
+});
+
 describe("transcriptLines", () => {
   const turn = (extra: Partial<TurnView>): TurnView => ({
     id: 1, intent: "ask", text: "how many orders?", steps: [], status: "done", activity: null,
     message: null, errorKind: null, proposal: null, source: null, ...extra,
   });
 
-  test("a finished Turn renders the user message as a padded OpenCode card without 'you' label, followed by agent label, Step and Proposal", () => {
+  test("a finished Turn renders the user message as a padded OpenCode card without 'you' label, followed by agent label, Step, a blank row and the Proposal header", () => {
     const lines = transcriptLines([turn({
       steps: [{ action: { action: "query", sql: "select count(*) from orders" }, result: '{"columns":["n"],"rows":[[12]],"truncated":false}' }],
       message: "There are 12 orders.",
@@ -87,13 +101,115 @@ describe("transcriptLines", () => {
       { kind: "user", text: "", pad: true, turnId: 1 },
       { kind: "blank" },
       { kind: "label", who: "agent", turnId: 1 },
-      { kind: "step", text: "▸ query  select count(*) from orders  → 1 row", turnId: 1 },
+      { kind: "step", text: "▸ query  select count(*) from orders  → 1 row", tone: "muted", turnId: 1 },
+      { kind: "blank" },
       { kind: "text", text: "There are 12 orders.", tone: "normal", turnId: 1 },
+      { kind: "proposal-header", text: "SQL Proposal", turnId: 1, proposalId: 7 },
       { kind: "sql", text: "select count(*)", turnId: 1, proposalId: 7 },
       { kind: "sql", text: "from orders", turnId: 1, proposalId: 7 },
       { kind: "hint", text: "enter accept  r run  y yank", turnId: 1, proposalId: 7 },
       { kind: "blank" },
     ]);
+  });
+
+  test("a blank row separates the last Step from the prose, and none is added when no prose follows", () => {
+    const step = { action: { action: "query" as const, sql: "select 1" }, result: '{"columns":[],"rows":[],"truncated":false}' };
+    const withProse = transcriptLines([turn({ steps: [step], message: "Done." })], 60, claude);
+    expect(withProse).toEqual([
+      { kind: "user", text: "", pad: true, turnId: 1 },
+      { kind: "user", text: "how many orders?", turnId: 1 },
+      { kind: "user", text: "", pad: true, turnId: 1 },
+      { kind: "blank" },
+      { kind: "label", who: "agent", turnId: 1 },
+      { kind: "step", text: "▸ query  select 1  → 0 rows", tone: "muted", turnId: 1 },
+      { kind: "blank" },
+      { kind: "text", text: "Done.", tone: "normal", turnId: 1 },
+      { kind: "blank" },
+    ]);
+
+    const withoutProse = transcriptLines([turn({ steps: [step] })], 60, claude);
+    expect(withoutProse.map((l) => l.kind)).toEqual(["user", "user", "user", "blank", "label", "step", "blank"]);
+  });
+
+  test("Step rows carry the error tone when the Step payload is an error", () => {
+    const lines = transcriptLines([turn({
+      steps: [
+        { action: { action: "query", sql: "select 1" }, result: '{"columns":[],"rows":[],"truncated":false}' },
+        { action: { action: "query", sql: "delete from orders" }, result: '{"error":"attempt to write a readonly database"}' },
+        { action: { action: "describe", relations: ["nope"] }, result: '{"error":"no relation named nope"}' },
+      ],
+      message: "Two failed.",
+    })], 80, claude);
+    expect(lines.filter((l) => l.kind === "step")).toEqual([
+      { kind: "step", text: "▸ query  select 1  → 0 rows", tone: "muted", turnId: 1 },
+      { kind: "step", text: "▸ query  delete from orders  → error: attempt to write a readonly database", tone: "error", turnId: 1 },
+      { kind: "step", text: "▸ describe  nope  → error: no relation named nope", tone: "error", turnId: 1 },
+    ]);
+  });
+
+  test("Agent prose uses the whole width while the user card keeps its inset", () => {
+    const message = "aaaa bbbb cccc dddd";
+    const lines = transcriptLines([turn({ text: "word ".repeat(30).trim(), message })], 20, claude);
+    expect(lines.filter((l) => l.kind === "text")).toEqual([
+      { kind: "text", text: message, tone: "normal", turnId: 1 },
+    ]);
+    for (const line of lines) {
+      if (line.kind === "user" && !line.pad) expect(line.text.length).toBeLessThanOrEqual(17);
+    }
+  });
+
+  test("a Proposal puts its header above the SQL and its hint below", () => {
+    const lines = transcriptLines([turn({
+      message: "One.",
+      proposal: { id: 7, turnId: 1, sql: "select 1 as x", kind: "read" },
+    })], 60, claude);
+    const kinds = lines.map((l) => String(l.kind));
+    const proseIdx = kinds.indexOf("text");
+    const headerIdx = kinds.indexOf("proposal-header");
+    const sqlIdx = kinds.indexOf("sql");
+    const hintIdx = kinds.indexOf("hint");
+    expect(headerIdx).toBeGreaterThan(proseIdx);
+    expect(sqlIdx).toBe(headerIdx + 1);
+    expect(hintIdx).toBe(sqlIdx + 1);
+    expect(lines[headerIdx]).toEqual({ kind: "proposal-header", text: "SQL Proposal", turnId: 1, proposalId: 7 });
+    expect(lines[hintIdx]).toEqual({ kind: "hint", text: "enter accept  r run  y yank", turnId: 1, proposalId: 7 });
+  });
+
+  test("Proposal SQL wraps two cells inside the width when there is room and at the width when there is not", () => {
+    const sql = "select aaaa, bbbb, cccc, dddd, eeee, ffff from t";
+    for (const width of [20, 40]) {
+      const lines = transcriptLines([turn({ proposal: { id: 7, turnId: 1, sql, kind: "read" } })], width, claude);
+      const rows = lines.filter((l) => l.kind === "sql");
+      expect(rows.length).toBeGreaterThan(1);
+      for (const row of rows) expect(Bun.stringWidth(row.text)).toBeLessThanOrEqual(width - 2);
+    }
+    const narrow = transcriptLines([turn({ proposal: { id: 7, turnId: 1, sql, kind: "read" } })], 10, claude);
+    const narrowRows = narrow.filter((l) => l.kind === "sql");
+    expect(narrowRows.length).toBeGreaterThan(1);
+    for (const row of narrowRows) expect(Bun.stringWidth(row.text)).toBeLessThanOrEqual(10);
+  });
+
+  test("fenced SQL in a message uses the same inset with no header, no selection and no hint", () => {
+    const sql = "select aaaa, bbbb, cccc, dddd, eeee, ffff from t";
+    const lines = transcriptLines([turn({ message: `Try:\n\`\`\`sql\n${sql}\n\`\`\`` })], 20, claude);
+    expect(lines.map((l) => String(l.kind))).not.toContain("proposal-header");
+    expect(lines.map((l) => String(l.kind))).not.toContain("hint");
+    const rows = lines.filter((l) => l.kind === "sql");
+    expect(rows.length).toBeGreaterThan(1);
+    for (const row of rows) {
+      expect(Bun.stringWidth(row.text)).toBeLessThanOrEqual(18);
+      expect(row.proposalId).toBeNull();
+    }
+  });
+
+  test("advice lines are written with the Leader the call is given", () => {
+    const lines = transcriptLines([turn({ status: "error", errorKind: "quota", message: "limit reached" })], 200, claude, ",");
+    const advice = lines
+      .filter((l) => l.kind === "text" && l.tone === "muted")
+      .map((l) => (l.kind === "text" ? l.text : ""))
+      .join(" ");
+    expect(advice).toContain(", p");
+    expect(advice).not.toContain("space p");
   });
 
   test("a running Turn ends with its status line", () => {
@@ -148,7 +264,7 @@ describe("transcriptLines", () => {
     return logical;
   }
 
-  test("Proposal SQL lines wrap with ↪ continuation markers at widths 20, 30, 42 and 80 without losing any character", () => {
+  test("Proposal SQL lines wrap two cells inside the width with ↪ continuation markers at widths 20, 30, 42 and 80 without losing any character", () => {
     const originalLines = deleteCancelledSql.split("\n");
     for (const width of [20, 30, 42, 80]) {
       const lines = transcriptLines(
@@ -158,7 +274,7 @@ describe("transcriptLines", () => {
       );
       const sqlRows = lines.filter((l) => l.kind === "sql");
       for (const row of sqlRows) {
-        expect(Bun.stringWidth(row.text)).toBeLessThanOrEqual(width);
+        expect(Bun.stringWidth(row.text)).toBeLessThanOrEqual(width - 2);
       }
       if (width <= 42) {
         expect(sqlRows.some((r) => r.text.startsWith("↪ "))).toBe(true);
@@ -166,9 +282,9 @@ describe("transcriptLines", () => {
       if (width === 42) {
         expect(sqlRows.map((r) => r.text)).toEqual([
           "BEGIN;",
-          "DELETE FROM order_items WHERE order_id IN ",
-          "↪ (SELECT id FROM orders WHERE status = ",
-          "↪ 'cancelled');",
+          "DELETE FROM order_items WHERE order_id ",
+          "↪ IN (SELECT id FROM orders WHERE ",
+          "↪ status = 'cancelled');",
           "DELETE FROM orders WHERE status = ",
           "↪ 'cancelled';",
           "COMMIT;",
@@ -197,11 +313,11 @@ describe("transcriptLines", () => {
   });
 
   test("wide characters and emoji at the break position are never split", () => {
-    // 19 single-cell ASCII chars followed by 2-cell wide char 漢 and 2-cell emoji 🚀 at width 20
+    // 19 single-cell ASCII chars followed by 2-cell wide char 漢 and 2-cell emoji 🚀 in the 20-cell SQL card
     const wideSql = "SELECT '12345678901漢🚀漢字テスト🚀end';";
     const lines = transcriptLines(
       [turn({ proposal: { id: 11, turnId: 1, sql: wideSql, kind: "read" } })],
-      20,
+      22,
       claude,
     );
     const sqlRows = lines.filter((l) => l.kind === "sql");

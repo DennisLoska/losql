@@ -18,7 +18,7 @@ import {
   ProposalCardLine,
   type SqlHighlightPiece,
 } from "./ProposalCard";
-import { type TranscriptLine, turnTranscriptLines } from "./transcript-model";
+import { sqlCardInset, type TranscriptLine, turnTranscriptLines } from "./transcript-model";
 
 export interface TranscriptHandle {
   scrollBy(delta: number): void;
@@ -26,19 +26,20 @@ export interface TranscriptHandle {
   scrollToTop(): void;
   scrollToBottom(): void;
   scrollToProposal(proposalId: number): void;
+  /** Where the view is: its first row, the furthest it can scroll, and how many rows there are. */
+  scrollPosition(): { effectiveScrollTop: number; maxScroll: number; totalLines: number };
 }
 
 interface RenderedTranscriptLine {
   line: TranscriptLine;
-  who: "you" | "agent";
   pieces?: SqlHighlightPiece[];
-  proposalId?: number | null;
 }
 
 interface TurnLineCacheEntry {
   turn: TurnView;
   width: number;
   providerKey: string;
+  leader: string;
   items: RenderedTranscriptLine[];
 }
 
@@ -46,6 +47,8 @@ export function Transcript(props: {
   turns: TurnView[];
   provider: { label: string; binary: string; installHint: string } | null;
   selectedProposalId: number | null;
+  /** The configured Leader, used to write shortcuts in error advice. */
+  leader?: string;
   onReady?: (handle: TranscriptHandle) => void;
 }): JSX.Element {
   const theme = useTheme();
@@ -71,6 +74,7 @@ export function Transcript(props: {
     const w = innerWidth();
     const prov = props.provider;
     const provKey = prov ? `${prov.label}:${prov.binary}:${prov.installHint}` : "";
+    const leader = props.leader ?? "space";
     const out: RenderedTranscriptLine[] = [];
     const seenIds = new Set<number>();
 
@@ -81,27 +85,15 @@ export function Transcript(props: {
         cached &&
         cached.turn === turn &&
         cached.width === w &&
-        cached.providerKey === provKey
+        cached.providerKey === provKey &&
+        cached.leader === leader
       ) {
         for (let i = 0; i < cached.items.length; i++) {
           out.push(cached.items[i]!);
         }
       } else {
-        const rawLines = turnTranscriptLines(turn, w, prov);
-        let currentWho: "you" | "agent" = "you";
-        const items: RenderedTranscriptLine[] = new Array(rawLines.length);
-        for (let i = 0; i < rawLines.length; i++) {
-          const l = rawLines[i]!;
-          if (l.kind === "label") {
-            currentWho = l.who;
-          }
-          const next = rawLines[i + 1];
-          const attachedProposalId =
-            l.kind === "text" && l.tone === "muted" && next?.kind === "hint"
-              ? next.proposalId
-              : null;
-          items[i] = { line: l, who: currentWho, proposalId: attachedProposalId };
-        }
+        const rawLines = turnTranscriptLines(turn, w, prov, leader);
+        const items: RenderedTranscriptLine[] = rawLines.map((line) => ({ line }));
 
         let idx = 0;
         while (idx < rawLines.length) {
@@ -128,7 +120,7 @@ export function Transcript(props: {
         for (let i = 0; i < items.length; i++) {
           out.push(items[i]!);
         }
-        cache.set(turn.id, { turn, width: w, providerKey: provKey, items });
+        cache.set(turn.id, { turn, width: w, providerKey: provKey, leader, items });
       }
     }
 
@@ -221,7 +213,7 @@ export function Transcript(props: {
       for (let i = 0; i < lines.length; i++) {
         const l = lines[i]!.line;
         if (
-          (l.kind === "sql" || l.kind === "hint") &&
+          (l.kind === "proposal-header" || l.kind === "sql" || l.kind === "hint") &&
           l.proposalId === proposalId
         ) {
           if (firstIdx === -1) firstIdx = i;
@@ -242,7 +234,16 @@ export function Transcript(props: {
       setScrollTop(next);
       setFollowing(next >= max);
     },
+    scrollPosition() {
+      return {
+        effectiveScrollTop: effectiveScrollTop(),
+        maxScroll: maxScroll(),
+        totalLines: allLines().length,
+      };
+    },
   };
+
+  const cardInset = createMemo(() => sqlCardInset(innerWidth()));
 
   props.onReady?.(handle);
 
@@ -267,9 +268,6 @@ export function Transcript(props: {
       <For each={visibleSlice()}>
         {(item) => {
           const line = item.line;
-          const turnBarColor = () =>
-            item.who === "you" ? theme.color("secondary") : theme.color("primary");
-
           return (
             <Switch>
               <Match when={line.kind === "blank"}>
@@ -300,23 +298,11 @@ export function Transcript(props: {
                 })()}
               </Match>
               <Match when={line.kind === "label"}>
-                {(() => {
-                  const lbl = line as Extract<TranscriptLine, { kind: "label" }>;
-                  return (
-                    <box height={1} width="100%" flexShrink={0} flexDirection="row">
-                      <text fg={turnBarColor()} flexShrink={0}>
-                        {"┃ "}
-                      </text>
-                      <text
-                        fg={theme.color("primary")}
-                        attributes={TextAttributes.BOLD}
-                        flexShrink={0}
-                      >
-                        {lbl.who}
-                      </text>
-                    </box>
-                  );
-                })()}
+                <box height={1} width="100%" flexShrink={0} flexDirection="row">
+                  <text fg={theme.color("primary")} attributes={TextAttributes.BOLD} flexShrink={0}>
+                    Agent
+                  </text>
+                </box>
               </Match>
               <Match when={line.kind === "text"}>
                 {(() => {
@@ -326,17 +312,8 @@ export function Transcript(props: {
                     if (txt.tone === "muted") return theme.color("textMuted");
                     return theme.color("text");
                   };
-                  const barFg = () =>
-                    item.proposalId !== null &&
-                    item.proposalId !== undefined &&
-                    props.selectedProposalId === item.proposalId
-                      ? theme.color("accent")
-                      : turnBarColor();
                   return (
                     <box height={1} width="100%" flexShrink={0} flexDirection="row" overflow="hidden">
-                      <text fg={barFg()} flexShrink={0}>
-                        {"┃ "}
-                      </text>
                       <text fg={fg()} wrapMode="none" flexShrink={0}>
                         {printable(txt.text)}
                       </text>
@@ -348,14 +325,28 @@ export function Transcript(props: {
                 {(() => {
                   const stp = line as Extract<TranscriptLine, { kind: "step" }>;
                   return (
-                    <box height={1} width="100%" flexShrink={0} flexDirection="row">
-                      <text fg={turnBarColor()} flexShrink={0}>
-                        {"┃ "}
-                      </text>
-                      <text fg={theme.color("textMuted")} flexShrink={0}>
+                    <box height={1} width="100%" flexShrink={0} flexDirection="row" overflow="hidden">
+                      <text
+                        fg={stp.tone === "error" ? theme.color("error") : theme.color("textMuted")}
+                        wrapMode="none"
+                        flexShrink={0}
+                      >
                         {printable(stp.text)}
                       </text>
                     </box>
+                  );
+                })()}
+              </Match>
+              <Match when={line.kind === "proposal-header"}>
+                {(() => {
+                  const hdr = line as Extract<TranscriptLine, { kind: "proposal-header" }>;
+                  return (
+                    <ProposalCardLine
+                      kind="header"
+                      text={hdr.text}
+                      inset={cardInset()}
+                      selected={props.selectedProposalId === hdr.proposalId}
+                    />
                   );
                 })()}
               </Match>
@@ -367,10 +358,10 @@ export function Transcript(props: {
                     <ProposalCardLine
                       kind="sql"
                       text={sqlLine.text}
+                      inset={cardInset()}
                       continuation={sqlLine.continuation === true}
                       pieces={item.pieces}
                       selected={propId !== null && props.selectedProposalId === propId}
-                      turnBarColor={turnBarColor()}
                     />
                   );
                 })()}
@@ -382,8 +373,8 @@ export function Transcript(props: {
                     <ProposalCardLine
                       kind="hint"
                       text={hintLine.text}
+                      inset={cardInset()}
                       selected={props.selectedProposalId === hintLine.proposalId}
-                      turnBarColor={turnBarColor()}
                     />
                   );
                 })()}
@@ -393,9 +384,6 @@ export function Transcript(props: {
                   const st = line as Extract<TranscriptLine, { kind: "status" }>;
                   return (
                     <box height={1} width="100%" flexShrink={0} flexDirection="row">
-                      <text fg={turnBarColor()} flexShrink={0}>
-                        {"┃ "}
-                      </text>
                       <Spinner />
                       <text flexShrink={0}>{" "}</text>
                       <Shimmer

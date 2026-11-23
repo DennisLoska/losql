@@ -39,6 +39,7 @@ import {
   startsWithMarkerChar,
   wrapText,
 } from "../panes/agent/transcript-model";
+import { keyLabel } from "../ui/key-label";
 import { useConfig } from "./config";
 import { useDeps } from "./deps";
 import { useDialog } from "./dialog";
@@ -327,7 +328,8 @@ export function AgentProvider(
 
     const prov = provider();
     if (!prov || !prov.installed || !prov.path) {
-      status.say(prov ? `${prov.label} was not found (use space p)` : "No agent is set up (use space p)", "error");
+      const pick = keyLabel("p", config.config().leader);
+      status.say(prov ? `${prov.label} was not found (use ${pick})` : `No agent is set up (use ${pick})`, "error");
       focus.focus("agent");
       return null;
     }

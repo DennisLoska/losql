@@ -1,12 +1,15 @@
 import { Database } from "bun:sqlite";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
+import { type CapturedSpan, TextAttributes } from "@opentui/core";
 import { createSignal, Show } from "solid-js";
 import { osc52 } from "../../../core/clipboard";
 import type { ExecRequest, ExecResult } from "../../../core/exec";
 import { readHistory } from "../../../core/state";
+import type { TurnView } from "../../context/agent";
 import { fakeClaude, mount, type FakeReply, type MountOptions, type TestApp } from "../../testing";
 import { AgentPane } from "./AgentPane";
+import { Transcript } from "./Transcript";
 
 let app: TestApp;
 let fake: ReturnType<typeof fakeClaude>;
@@ -27,6 +30,67 @@ const orderCount = async () => {
   const [outcome] = await app.api.session.run({ statements: ["select count(*) from orders"], record: false, show: false });
   return outcome!.ok ? outcome!.result.rows[0]![0] : null;
 };
+
+const sameColor = (a: { toInts(): number[] }, b: { toInts(): number[] }) =>
+  a.toInts().join(",") === b.toInts().join(",");
+
+interface AgentView {
+  /** The rows of the Agent Pane, with the other Panes and the Pane border cut away. */
+  text: string[];
+  /** The spans of each row, limited to the cells inside the Agent Pane. */
+  spans: CapturedSpan[][];
+}
+
+function agentView(): AgentView {
+  const frameLines = app.frame().split("\n");
+  const top = frameLines[0] ?? "";
+  const left = top.lastIndexOf("╭");
+  const right = top.lastIndexOf("╮");
+  const bordered = left >= 0 && right > left;
+  const leftCol = bordered ? left + 1 : 0;
+  const rightCol = bordered ? right : null;
+  const text = frameLines.map((line) => (rightCol === null ? line : line.slice(leftCol, rightCol)));
+  const spans = app.spans().lines.map((line) => {
+    const inside: CapturedSpan[] = [];
+    let x = 0;
+    for (const span of line.spans) {
+      const start = x;
+      x += span.width;
+      if (start >= leftCol && (rightCol === null || start < rightCol)) inside.push(span);
+    }
+    return inside;
+  });
+  return { text, spans };
+}
+
+/** The rows of the Agent Pane's SQL cards: painted with the card surface and never carrying the user quote bar. */
+function agentSqlRows(view: AgentView = agentView()): string[] {
+  const theme = app.api.theme;
+  const surfaces = [theme.color("backgroundElement"), theme.color("selection")];
+  const rows: string[] = [];
+  for (let y = 0; y < view.text.length; y++) {
+    const text = view.text[y] ?? "";
+    if (text.includes("┃")) continue;
+    const painted = (view.spans[y] ?? []).some(
+      (s) => s.text.trim().length > 0 && surfaces.some((surface) => sameColor(s.bg, surface)),
+    );
+    if (painted) rows.push(text.trim());
+  }
+  return rows;
+}
+
+/** Puts the ↪ continuation rows of a SQL card back together. */
+function unwrapAgentSql(rows: string[]): string {
+  const logical: string[] = [];
+  for (const cell of rows) {
+    if (cell.startsWith("↪ ")) {
+      if (logical.length > 0) logical[logical.length - 1] += ` ${cell.slice(2).trimStart()}`;
+    } else {
+      logical.push(cell);
+    }
+  }
+  return logical.join("\n");
+}
 
 const countQuery = '{"action":"query","sql":"select count(*) as n from orders","why":"count them"}';
 const countAnswer = '{"action":"answer","message":"There are 12 orders.","sql":"select count(*) as orders from orders"}';
@@ -81,7 +145,7 @@ describe("a Turn", () => {
     expect(turn()).toMatchObject({ intent: "ask", text: "how many orders are there", status: "done", message: "There are 12 orders." });
     expect(turn().steps.length).toBe(1);
     expect(turn().proposal).toMatchObject({ sql: "select count(*) as orders from orders", kind: "read" });
-    for (const text of ["┃  how many orders are there", "agent", "▸ query", "→ 1 row", "There are 12 orders.", "select count(*) as orders", "enter accept"]) {
+    for (const text of ["┃  how many orders are there", "Agent", "▸ query", "→ 1 row", "There are 12 orders.", "SQL Proposal", "select count(*) as orders", "enter accept"]) {
       expect(app.frame()).toContain(text);
     }
     expect(app.frame()).not.toContain("┃ you");
@@ -368,21 +432,8 @@ describe("long Proposal SQL wrapping in the Agent Pane", () => {
     sql: deleteCancelledSql,
   });
 
-  function unwrapFrameSql(frame: string): string {
-    const cardRows: string[] = [];
-    for (const rawLine of frame.split("\n")) {
-      const idx = rawLine.lastIndexOf("┃ ");
-      if (idx === -1) continue;
-      const cell = rawLine.slice(idx + 2).replace(/│$/, "").trimEnd();
-      if (cell.startsWith("↪ ")) {
-        if (cardRows.length > 0) {
-          cardRows[cardRows.length - 1] += ` ${cell.slice(2).trimStart()}`;
-        }
-      } else {
-        cardRows.push(cell);
-      }
-    }
-    return cardRows.join("\n");
+  function unwrapFrameSql(): string {
+    return unwrapAgentSql(agentSqlRows());
   }
 
   test("at 140x40 and 80x24 both DELETE lines show status = 'cancelled', accepting inserts the exact SQL, and resizing updates the frame", async () => {
@@ -395,7 +446,7 @@ describe("long Proposal SQL wrapping in the Agent Pane", () => {
     expect(app.frame()).toContain("↪");
     expect(app.frame()).toContain("status = 'cancelled');");
     expect(app.frame()).toContain("↪ 'cancelled';");
-    const unwrapped140 = unwrapFrameSql(app.frame());
+    const unwrapped140 = unwrapFrameSql();
     expect(unwrapped140).toContain(
       "DELETE FROM order_items WHERE order_id IN (SELECT id FROM orders WHERE status = 'cancelled');",
     );
@@ -415,7 +466,7 @@ describe("long Proposal SQL wrapping in the Agent Pane", () => {
     expect(app.frame()).toContain("↪");
     expect(app.frame()).toContain("status = 'cancelled');");
     expect(app.frame()).toContain("↪ 'cancelled';");
-    const unwrapped80 = unwrapFrameSql(app.frame());
+    const unwrapped80 = unwrapFrameSql();
     expect(unwrapped80).toContain(
       "DELETE FROM order_items WHERE order_id IN (SELECT id FROM orders WHERE status = 'cancelled');",
     );
@@ -441,43 +492,42 @@ describe("long Proposal SQL wrapping in the Agent Pane", () => {
     app.api.focus.focus("agent");
     await app.settle();
 
-    const unwrapped80 = unwrapFrameSql(app.frame());
+    const unwrapped80 = unwrapFrameSql();
     expect(unwrapped80).toContain(
       "DELETE FROM order_items WHERE order_id IN (SELECT id FROM orders WHERE status = 'cancelled');",
     );
     expect(unwrapped80).toContain("DELETE FROM orders WHERE status = 'cancelled';");
 
-    // Check continuation marker and syntax colours on continuation rows
-    const spans = app.spans();
+    // The marker stays muted, and the rows that continue a string or a comment keep its colour
+    const view = agentView();
     const mutedColor = app.api.theme.color("textMuted");
     const stringColor = app.api.theme.color("syntaxString");
     const commentColor = app.api.theme.color("syntaxComment");
 
-    let foundMarker = false;
-    let foundContinuedString = false;
-    let foundContinuedComment = false;
-    for (const line of spans.lines) {
-      for (const span of line.spans) {
-        if (span.text.includes("↪")) {
-          foundMarker = true;
-          expect(span.fg).toEqual(mutedColor);
-        }
-        if (span.text.includes("_continues_onto_the_next_row_in_the")) {
-          foundContinuedString = true;
-          expect(span.fg).toEqual(stringColor);
-        }
-        if (span.text.includes("ntinues_onto_the_next_row_in_the_card")) {
-          foundContinuedComment = true;
-          expect(span.fg).toEqual(commentColor);
-        }
-      }
-    }
-    expect(foundMarker).toBe(true);
-    expect(foundContinuedString).toBe(true);
-    expect(foundContinuedComment).toBe(true);
+    const longestSpan = (y: number) =>
+      [...(view.spans[y] ?? [])].sort((a, b) => b.text.trim().length - a.text.trim().length)[0]!;
+    const continuationsAfter = (needle: string): number[] => {
+      const from = view.text.findIndex((row) => row.includes(needle));
+      expect(from).toBeGreaterThanOrEqual(0);
+      const rows: number[] = [];
+      for (let y = from + 1; y < view.text.length && view.text[y]!.includes("↪"); y++) rows.push(y);
+      return rows;
+    };
+
+    const stringRows = continuationsAfter("SELECT 'a_very_long");
+    expect(stringRows.length).toBeGreaterThan(0);
+    for (const y of stringRows) expect(longestSpan(y).fg).toEqual(stringColor);
+
+    const commentRows = continuationsAfter("SELECT 1 -- a_very_long_comment");
+    expect(commentRows.length).toBeGreaterThan(0);
+    for (const y of commentRows) expect(longestSpan(y).fg).toEqual(commentColor);
+
+    const markers = view.spans.flat().filter((span) => span.text.trim() === "↪");
+    expect(markers.length).toBeGreaterThan(0);
+    for (const marker of markers) expect(marker.fg).toEqual(mutedColor);
 
     await app.resize(140, 40);
-    const unwrapped140 = unwrapFrameSql(app.frame());
+    const unwrapped140 = unwrapFrameSql();
     expect(unwrapped140).toContain(
       "DELETE FROM order_items WHERE order_id IN (SELECT id FROM orders WHERE status = 'cancelled');",
     );
@@ -501,7 +551,7 @@ describe("long Proposal SQL wrapping in the Agent Pane", () => {
 
     // At width 50 (inner width 45), the 93-cell and 46-cell DELETE lines wrap with ↪
     expect(app.frame()).toContain("↪");
-    expect(unwrapFrameSql(app.frame())).toContain(
+    expect(unwrapFrameSql()).toContain(
       "DELETE FROM order_items WHERE order_id IN (SELECT id FROM orders WHERE status = 'cancelled');",
     );
 
@@ -516,7 +566,7 @@ describe("long Proposal SQL wrapping in the Agent Pane", () => {
     // Resize back to width 46 (inner width 41, matching 42-cell card width): wraps again with ↪
     await app.resize(46, 24);
     expect(app.frame()).toContain("↪");
-    expect(unwrapFrameSql(app.frame())).toContain(
+    expect(unwrapFrameSql()).toContain(
       "DELETE FROM order_items WHERE order_id IN (SELECT id FROM orders WHERE status = 'cancelled');",
     );
     await app.dispose();
@@ -575,6 +625,7 @@ describe("long Proposal SQL wrapping in the Agent Pane", () => {
           turns={turnsSig()}
           provider={{ label: "Claude Code", binary: "claude", installHint: "install claude" }}
           selectedProposalId={200}
+          leader="space"
           onReady={(h) => {
             handle = h;
           }}
@@ -1113,14 +1164,9 @@ function seededRandom(seed: number): () => number {
   };
 }
 
-/** The rows of the card in the frame: the text after the last "┃ " of each line that has one. */
-function cardRows(frame: string): string[] {
-  const rows: string[] = [];
-  for (const line of frame.split("\n")) {
-    const idx = line.lastIndexOf("┃ ");
-    if (idx !== -1) rows.push(line.slice(idx + 2).replace(/│$/, "").trimEnd());
-  }
-  return rows;
+/** The rows of the SQL cards in the Agent Pane. */
+function cardRows(): string[] {
+  return agentSqlRows();
 }
 
 /** The content box of the open confirmation, cut out of the frame by the column of its title. */
@@ -1149,7 +1195,7 @@ describe("fix 1: a Proposal is shown, accepted and run as the database reads it"
       app.api.focus.focus("agent");
       await app.settle();
 
-      const rows = cardRows(app.frame());
+      const rows = cardRows();
       const first = rows.findIndex((r) => r.startsWith("delete from orders -- cleanup"));
       expect(first).toBeGreaterThanOrEqual(0);
       expect(rows[first]).toBe("delete from orders -- cleanup");
@@ -1178,7 +1224,7 @@ describe("fix 2: a real SQL line starting with ↪ is not taken for a continuati
     app.api.focus.focus("agent");
     await app.settle();
 
-    const rows = cardRows(app.frame());
+    const rows = cardRows();
     expect(rows).toContain("\\u21AA ; select 2");
 
     const theme = app.api.theme;
@@ -1195,16 +1241,17 @@ describe("fix 2: a real SQL line starting with ↪ is not taken for a continuati
       if (span.text.trim().length > 0) expect(span.fg).not.toEqual(theme.color("syntaxComment"));
     }
 
-    let continuedComment = false;
-    for (const line of lines) {
-      for (const span of line.spans) {
-        if (span.text.includes("next_row_of_the_card")) {
-          continuedComment = true;
-          expect(span.fg).toEqual(theme.color("syntaxComment"));
-        }
-      }
+    // The wrapped comment keeps the comment's colour on its continuation rows
+    const view = agentView();
+    const commentFrom = view.text.findIndex((row) => row.includes("select 3 -- a_very_long_comment"));
+    expect(commentFrom).toBeGreaterThanOrEqual(0);
+    const commentRows: number[] = [];
+    for (let y = commentFrom + 1; y < view.text.length && view.text[y]!.includes("↪"); y++) commentRows.push(y);
+    expect(commentRows.length).toBeGreaterThan(0);
+    for (const y of commentRows) {
+      const longest = [...(view.spans[y] ?? [])].sort((a, b) => b.text.trim().length - a.text.trim().length)[0]!;
+      expect(longest.fg).toEqual(theme.color("syntaxComment"));
     }
-    expect(continuedComment).toBe(true);
 
     await app.press("<Esc><CR>");
     expect(app.api.editor.text()).toBe(sql);
@@ -1811,3 +1858,294 @@ describe("automatic Editor context and workspace tools", () => {
   });
 });
 
+
+describe("Agent transcript chrome: the quote bar belongs to the user message only", () => {
+  test("no Agent label, Step, prose, Proposal header, SQL row or hint carries the quote bar", async () => {
+    await start([countQuery, countAnswer]);
+    await app.api.agent.ask({ intent: "ask", text: "how many orders are there" });
+    await finished();
+    app.api.focus.focus("agent");
+    await app.settle();
+
+    const { text } = agentView();
+    const userRows = text.filter((row) => row.includes("┃"));
+    expect(userRows.length).toBe(3);
+    expect(userRows.some((row) => row.includes("┃  how many orders are there"))).toBe(true);
+    expect(userRows.some((row) => /┃\s*$/.test(row))).toBe(true);
+
+    const agentRows = text.filter((row) =>
+      /Agent|▸ query|There are 12 orders\.|SQL Proposal|enter accept|select count\(\*\) as orders/.test(row),
+    );
+    expect(agentRows.length).toBeGreaterThanOrEqual(6);
+    for (const row of agentRows) expect(row).not.toContain("┃");
+  });
+
+  test("the running status row has no quote bar either", async () => {
+    let release = () => {};
+    const hold = new Promise<void>((resolve) => { release = resolve; });
+    await start([{ hold, reply: countAnswer }]);
+    const asking = app.api.agent.ask({ intent: "ask", text: "slow question" });
+    app.api.focus.focus("agent");
+    await app.waitFor(() => app.api.agent.running());
+    const statusRow = agentView().text.find((row) => row.includes("thinking"));
+    expect(statusRow).toBeDefined();
+    expect(statusRow!).not.toContain("┃");
+    release();
+    await asking;
+  });
+
+  test("an error line and its advice have no quote bar", async () => {
+    // Wide enough that neither the error nor its advice wraps, so each needle sits on one row.
+    await start([{ error: "You've hit your usage limit. Try again on Nov 16." }], { width: 400, height: 40 });
+    await app.api.agent.ask({ intent: "ask", text: "first" });
+    app.api.focus.focus("agent");
+    await app.settle();
+    const { text } = agentView();
+    const errorRow = text.find((row) => row.includes("Try again on Nov 16"));
+    expect(errorRow).toBeDefined();
+    expect(errorRow!).not.toContain("┃");
+    const adviceRow = text.find((row) => row.includes("switch provider"));
+    expect(adviceRow).toBeDefined();
+    expect(adviceRow!).not.toContain("┃");
+  });
+});
+
+describe("Proposal cards and fenced SQL in the Agent transcript", () => {
+  const provider = { label: "Claude Code", binary: "claude", installHint: "install claude" };
+
+  const proposalTurn = (id: number, proposalId: number, sql: string): TurnView => ({
+    id,
+    intent: "ask",
+    text: `question ${id}`,
+    steps: [],
+    status: "done",
+    activity: null,
+    message: `answer ${id}`,
+    errorKind: null,
+    proposal: { id: proposalId, turnId: id, sql, kind: "read" },
+    source: null,
+  });
+
+  interface RenderedLine {
+    text: string;
+    spans: CapturedSpan[];
+  }
+
+  function renderedLines(): RenderedLine[] {
+    const text = app.frame().split("\n");
+    const spans = app.spans().lines;
+    return text.map((row, y) => ({ text: row, spans: spans[y]?.spans ?? [] }));
+  }
+
+  function lineWith(needle: string): RenderedLine {
+    const line = renderedLines().find((row) => row.text.includes(needle));
+    expect(line).toBeDefined();
+    return line!;
+  }
+
+  /** The header row, SQL row and hint row of the Proposal that holds `sqlNeedle`. */
+  function proposalBlock(sqlNeedle: string): { header: RenderedLine; sql: RenderedLine; hint: RenderedLine } {
+    const lines = renderedLines();
+    const sqlIdx = lines.findIndex((row) => row.text.includes(sqlNeedle));
+    expect(sqlIdx).toBeGreaterThanOrEqual(0);
+    const header = lines.slice(0, sqlIdx).reverse().find((row) => row.text.includes("SQL Proposal"));
+    const hint = lines.slice(sqlIdx + 1).find((row) => row.text.includes("enter accept"));
+    expect(header).toBeDefined();
+    expect(hint).toBeDefined();
+    return { header: header!, sql: lines[sqlIdx]!, hint: hint! };
+  }
+
+  const textBg = (line: RenderedLine): string[] =>
+    line.spans.filter((s) => s.text.trim().length > 0).map((s) => s.bg.toInts().join(","));
+
+  test("the selected Proposal is accent and bold on the selection surface, and the styling moves when the selection does", async () => {
+    const turns = [proposalTurn(1, 7, "select 1 as one"), proposalTurn(2, 8, "select 2 as two")];
+    const [selected, setSelected] = createSignal<number | null>(8);
+    app = await mount({
+      width: 70,
+      height: 24,
+      connection: null,
+      ui: () => <Transcript turns={turns} provider={provider} selectedProposalId={selected()} leader="space" />,
+    });
+    const theme = app.api.theme;
+    const selection = theme.color("selection").toInts().join(",");
+    const backgroundElement = theme.color("backgroundElement").toInts().join(",");
+
+    const expectSelected = (sqlNeedle: string) => {
+      const { header, sql, hint } = proposalBlock(sqlNeedle);
+      expect(header.text).toMatch(/^ {2}▸ SQL Proposal\s*$/);
+      const headerSpan = header.spans.find((s) => s.text.includes("SQL Proposal"))!;
+      expect(sameColor(headerSpan.fg, theme.color("accent"))).toBe(true);
+      expect(headerSpan.attributes & TextAttributes.BOLD).toBeGreaterThan(0);
+      expect(sql.text).toMatch(/^ {2}\S/);
+      for (const bg of textBg(sql)) expect(bg).toBe(selection);
+      const hintSpan = hint.spans.find((s) => s.text.includes("enter accept"))!;
+      expect(sameColor(hintSpan.fg, theme.color("accent"))).toBe(true);
+    };
+
+    const expectUnselected = (sqlNeedle: string) => {
+      const { header, sql, hint } = proposalBlock(sqlNeedle);
+      expect(header.text).toMatch(/^ {2}SQL Proposal\s*$/);
+      expect(header.text).not.toContain("▸");
+      const headerSpan = header.spans.find((s) => s.text.includes("SQL Proposal"))!;
+      expect(sameColor(headerSpan.fg, theme.color("textMuted"))).toBe(true);
+      expect(headerSpan.attributes & TextAttributes.BOLD).toBe(0);
+      expect(sql.text).toMatch(/^ {2}\S/);
+      for (const bg of textBg(sql)) expect(bg).toBe(backgroundElement);
+      const hintSpan = hint.spans.find((s) => s.text.includes("enter accept"))!;
+      expect(sameColor(hintSpan.fg, theme.color("textMuted"))).toBe(true);
+    };
+
+    expectSelected("select 2 as two");
+    expectUnselected("select 1 as one");
+
+    setSelected(7);
+    await app.settle();
+    expectSelected("select 1 as one");
+    expectUnselected("select 2 as two");
+
+    setSelected(null);
+    await app.settle();
+    expectUnselected("select 1 as one");
+    expectUnselected("select 2 as two");
+  });
+
+  test("fenced SQL in prose is inset on the base surface with no header, no selection highlight and no hint", async () => {
+    const turn: TurnView = {
+      id: 1,
+      intent: "ask",
+      text: "try this",
+      steps: [],
+      status: "done",
+      activity: null,
+      message: "Try this:\n```sql\nselect aaaa, bbbb, cccc, dddd\n```",
+      errorKind: null,
+      proposal: null,
+      source: null,
+    };
+    app = await mount({
+      width: 70,
+      height: 20,
+      connection: null,
+      ui: () => <Transcript turns={[turn]} provider={provider} selectedProposalId={null} leader="space" />,
+    });
+    const theme = app.api.theme;
+    const frame = app.frame();
+    expect(frame).not.toContain("SQL Proposal");
+    expect(frame).not.toContain("enter accept");
+
+    const sql = lineWith("select aaaa");
+    expect(sql.text).toMatch(/^ {2}select aaaa/);
+    expect(sql.text).not.toContain("┃");
+    const backgroundElement = theme.color("backgroundElement").toInts().join(",");
+    for (const bg of textBg(sql)) expect(bg).toBe(backgroundElement);
+  });
+
+  test("a failed describe Step is drawn in the error foreground while a good Step stays muted", async () => {
+    const failed: TurnView = {
+      id: 1,
+      intent: "ask",
+      text: "describe missing",
+      steps: [{ action: { action: "describe", relations: ["missing"] }, result: '{"error":"no relation named missing"}' }],
+      status: "done",
+      activity: null,
+      message: "I could not describe it.",
+      errorKind: null,
+      proposal: null,
+      source: null,
+    };
+    app = await mount({
+      width: 70,
+      height: 20,
+      connection: null,
+      ui: () => <Transcript turns={[failed]} provider={provider} selectedProposalId={null} leader="space" />,
+    });
+    let theme = app.api.theme;
+    const failedStep = lineWith("▸ describe");
+    expect(failedStep.text).toContain("→ error: no relation named missing");
+    const failedSpan = failedStep.spans.find((s) => s.text.includes("describe"))!;
+    expect(sameColor(failedSpan.fg, theme.color("error"))).toBe(true);
+
+    await app.dispose();
+    const good: TurnView = {
+      ...failed,
+      steps: [{ action: { action: "query", sql: "select 1" }, result: '{"columns":[],"rows":[],"truncated":false}' }],
+      message: "It has no rows.",
+    };
+    app = await mount({
+      width: 70,
+      height: 20,
+      connection: null,
+      ui: () => <Transcript turns={[good]} provider={provider} selectedProposalId={null} leader="space" />,
+    });
+    theme = app.api.theme;
+    const goodStep = lineWith("▸ query");
+    const goodSpan = goodStep.spans.find((s) => s.text.includes("query"))!;
+    expect(sameColor(goodSpan.fg, theme.color("textMuted"))).toBe(true);
+  });
+});
+
+describe("the configured Leader in Agent advice and setup errors", () => {
+  test("changing the Leader re-renders the cached error advice without a new Turn object", async () => {
+    await start([{ error: "You've hit your usage limit. Try again on Nov 16." }], {
+      width: 400,
+      height: 40,
+      config: { leader: "," },
+    });
+    await app.api.agent.ask({ intent: "ask", text: "first" });
+    app.api.focus.focus("agent");
+    await app.settle();
+    expect(app.frame()).toContain(", p");
+    expect(app.frame()).not.toContain("space p");
+    const before = app.api.agent.turns()[0]!;
+
+    await app.api.config.set((config) => ({ ...config, leader: ";" }));
+    await app.settle();
+    expect(app.api.agent.turns()[0]).toBe(before);
+    expect(app.frame()).toContain("; p");
+    expect(app.frame()).not.toContain(", p");
+  });
+
+  test("the Provider setup errors name the configured Leader", async () => {
+    await start([countAnswer], { config: { leader: "," } });
+    await app.api.config.set((config) => ({ ...config, agent: { ...config.agent, provider: null } }));
+    await app.api.agent.ask({ intent: "ask", text: "hello" });
+    expect(app.api.status.message()).toEqual({ text: "No agent is set up (use , p)", kind: "error" });
+
+    await app.api.config.set((config) => ({ ...config, agent: { ...config.agent, provider: "codex" } }));
+    await app.api.agent.ask({ intent: "ask", text: "hello" });
+    expect(app.api.status.message()).toEqual({ text: "Codex was not found (use , p)", kind: "error" });
+  });
+});
+
+describe("the Agent status line shows the scroll position", () => {
+  test("a scrollable transcript shows bot at the bottom and line/total once scrolled up", async () => {
+    const long = JSON.stringify({ action: "answer", message: Array.from({ length: 60 }, (_, i) => `line ${i}`).join("\n") });
+    await start([long]);
+    await app.api.agent.ask({ intent: "ask", text: "first" });
+    app.api.focus.focus("agent");
+    await app.settle();
+    expect(app.api.status.current().position).toBe("bot");
+
+    await app.press("<Esc>gg");
+    const top = app.api.status.current().position;
+    expect(top).toMatch(/^1\/[1-9][0-9]*$/);
+    expect(Number(top.split("/")[1])).toBeGreaterThan(1);
+
+    await app.press("G");
+    expect(app.api.status.current().position).toBe("bot");
+
+    await app.press("k");
+    const scrolled = app.api.status.current().position;
+    expect(scrolled).toMatch(/^[1-9][0-9]*\/[1-9][0-9]*$/);
+    expect(Number(scrolled.split("/")[0])).toBeLessThan(Number(scrolled.split("/")[1]));
+  });
+
+  test("a transcript that fits in the viewport shows no position", async () => {
+    await start(['{"action":"answer","message":"Short."}']);
+    await app.api.agent.ask({ intent: "ask", text: "short" });
+    app.api.focus.focus("agent");
+    await app.settle();
+    expect(app.api.status.current().position).toBe("");
+  });
+});
