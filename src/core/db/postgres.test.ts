@@ -1146,6 +1146,21 @@ suite("postgres relation details and the side queue", () => {
     expect(await callDescribe(driver, { namespace: `${schema}_missing`, name: "child" })).toBeNull();
   }, 20000);
 
+  test("describeRelation does not match a longer name by its first 63 bytes", async () => {
+    const longName = `t${"x".repeat(62)}`;
+    expect(Buffer.byteLength(longName)).toBe(63);
+    await driver.run(`create table ${schema}.${longName} (id int)`);
+    try {
+      const exact = await callDescribe(driver, ref(longName));
+      expect(exact).not.toBeNull();
+      expect(exact!.name).toBe(longName);
+
+      expect(await callDescribe(driver, ref(`${longName}y`))).toBeNull();
+    } finally {
+      await driver.run(`drop table ${schema}.${longName}`);
+    }
+  }, 20000);
+
   test("a read-only Run returning an unseeded type overlaps schema() and describeRelation() without interleaving", async () => {
     const id = "11111111-1111-1111-1111-111111111111";
     const [readOnlyRun, snapshot, details] = await Promise.all([
@@ -1316,17 +1331,52 @@ suite("postgres relation details and the side queue", () => {
       ]);
       expect(outcome).not.toBe("hung");
       const result = outcome as Awaited<ReturnType<Driver["run"]>>;
-      expect(result.columns).toEqual([{ name: "ip", type: "869" }]);
+      // Resolved on the user connection itself, inside the open transaction.
+      expect(result.columns).toEqual([{ name: "ip", type: "inet" }]);
       expect(result.rows).toEqual([["10.0.0.1"]]);
 
+      // The lookup left the transaction usable: it still holds the lock and commits cleanly.
+      expect((await session.run("select 1 as one")).rows).toEqual([[1]]);
       await session.run("rollback");
       expect((await blocked).rows).toEqual([[0]]);
 
-      // The background lookup was queued behind the blocked Run; a read-only Run queued after it
-      // returns once it is done, and later Runs then show the resolved name.
-      await session.run("select 1", { readOnly: true });
       const later = await session.run("select '10.0.0.2'::inet as ip");
       expect(later.columns).toEqual([{ name: "ip", type: "inet" }]);
+    } finally {
+      await session.close();
+    }
+  }, 20000);
+
+  test("a user-connection Run resolves an uncached type while unrelated side work is running", async () => {
+    // A fresh Session, so `cidr` is not in its type name cache yet.
+    const session = await openSession(parseConnection(url!));
+    try {
+      const sleeper = session.run("select pg_sleep(2) as slept", { readOnly: true }).then(
+        (result) => result,
+        (error) => error,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 150));
+
+      const startedAt = performance.now();
+      const result = await session.run("select '10.0.0.0/8'::cidr as net");
+      expect(performance.now() - startedAt).toBeLessThan(1000);
+      expect(result.columns).toEqual([{ name: "net", type: "cidr" }]);
+      expect(result.rows).toEqual([["10.0.0.0/8"]]);
+
+      expect((await sleeper).columns).toEqual([{ name: "slept", type: "void" }]);
+    } finally {
+      await session.close();
+    }
+  }, 20000);
+
+  test("a user-connection Run names a type created in its own open transaction", async () => {
+    const session = await openSession(parseConnection(url!));
+    try {
+      await session.run("begin");
+      await session.run(`create type ${schema}.tx_mood as enum ('happy')`);
+      const inTx = await session.run(`select 'happy'::${schema}.tx_mood as mood`);
+      expect(inTx.columns).toEqual([{ name: "mood", type: "tx_mood" }]);
+      await session.run("rollback");
     } finally {
       await session.close();
     }

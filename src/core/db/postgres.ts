@@ -490,8 +490,6 @@ export async function openPostgres(
   // The tail of the exclusive queue for the side client: each holder runs alone on it, so a
   // read-only Run's transaction, its ROLLBACK and RESET ALL never interleave with other side work.
   let sideTail: Promise<void> = Promise.resolve();
-  // Slots taken on the side queue and not yet released, waiting or running; 0 means it is idle.
-  let sideOccupants = 0;
   let closingPromise: Promise<void> | null = null;
 
   const sessionClosedError = () => new QueryError("the Session is closed");
@@ -563,12 +561,10 @@ export async function openPostgres(
     sideTail = new Promise<void>((resolve) => {
       resolveTurn = resolve;
     });
-    sideOccupants++;
     let released = false;
     const releaseTurn = () => {
       if (released) return;
       released = true;
-      sideOccupants--;
       resolveTurn();
     };
 
@@ -695,18 +691,34 @@ export async function openPostgres(
   }
 
   /**
-   * Fills the type name cache for a user-connection Run's `oids` without ever waiting for a busy
-   * side client: its work may be waiting for a lock the user's own open transaction holds. While it
-   * is busy, uncached types show as their OIDs and are looked up in the background for later Runs.
+   * Names a user-connection Run's `oids`, looking up uncached ones on the user connection itself,
+   * right after its statement succeeded there: never behind a busy side client (whose work may be
+   * waiting for a lock the user's own open transaction holds), and it also sees types the user's
+   * open transaction created. Names are cached only when that transaction has written nothing, so
+   * nothing it may roll back is kept; OIDs pg_type does not show are not cached either. A failed
+   * lookup is not a failed Run: its uncached types show as their OIDs.
    */
-  async function resolveTypeNamesWithoutWaiting(oids: number[]): Promise<void> {
-    if (oids.every((oid) => typeNames.has(oid))) return;
+  async function resolveTypeNamesOnUser(oids: number[]): Promise<Map<number, string>> {
+    const names = new Map<number, string>();
+    const missing = [...new Set(oids.filter((oid) => !typeNames.has(oid)))];
+    if (missing.length === 0) return names;
 
-    if (sideOccupants === 0) {
-      await withSide(() => lookupTypeNames(oids, undefined));
-      return;
+    try {
+      const rows = await user.unsafe<{ oid: string; typname: string; cacheable: boolean }[]>(
+        "select t.oid::bigint as oid, t.typname::text as typname, txid_current_if_assigned() is null as cacheable from pg_catalog.pg_type t where t.oid = any($1::oid[])",
+        [missing],
+        // Unnamed: a user's DEALLOCATE ALL or DISCARD ALL cannot break it inside their transaction.
+        { prepare: false },
+      );
+      for (const row of rows) {
+        const oid = Number(row.oid);
+        names.set(oid, row.typname);
+        if (row.cacheable) typeNames.set(oid, row.typname);
+      }
+    } catch {
+      // The Run itself succeeded; its uncached types show as their OIDs.
     }
-    void withSide(() => lookupTypeNames(oids, undefined)).catch(() => {});
+    return names;
   }
 
   /** The Structure of one Relation; runs inside a `withSide` slot. Every value is a bound parameter. */
@@ -715,7 +727,7 @@ export async function openPostgres(
     signal: AbortSignal | undefined,
   ): Promise<RelationDetails | null> {
     const relRows = await sideQuery<{ oid: string; relkind: string; definition: string | null }[]>(
-      "select c.oid::text as oid, c.relkind, case when c.relkind in ('v','m') then pg_get_viewdef(c.oid, true) end as definition from pg_class c join pg_namespace n on n.oid = c.relnamespace where n.nspname = $1 and c.relname = $2 and c.relkind in ('r','p','v','m','f')",
+      "select c.oid::text as oid, c.relkind, case when c.relkind in ('v','m') then pg_get_viewdef(c.oid, true) end as definition from pg_class c join pg_namespace n on n.oid = c.relnamespace where n.nspname::text = $1::text and c.relname::text = $2::text and c.relkind in ('r','p','v','m','f')",
       [ref.namespace, ref.name],
       signal,
     );
@@ -1052,18 +1064,19 @@ export async function openPostgres(
 
         // Outside the read-only slot (the queue is not reentrant). A read-only Run's lookup stays
         // within its timeout budget. A Run on the user connection may already have written, so a
-        // late abort must not report it as canceled, and it never waits for a busy side client.
+        // late abort must not report it as canceled; its lookup runs on the user connection.
         const oids = rawColumns.map((c) => c.type);
+        let runTypeNames: Map<number, string> | undefined;
         if (isReadOnly) {
           const hasTimeout =
             timeoutMs !== undefined && Number.isFinite(timeoutMs) && timeoutMs > 0;
           await resolveTypeNames(oids, signal, hasTimeout ? start + timeoutMs : undefined);
         } else {
-          await resolveTypeNamesWithoutWaiting(oids);
+          runTypeNames = await resolveTypeNamesOnUser(oids);
         }
         const columns: Column[] = rawColumns.map((c) => ({
           name: c.name,
-          type: typeNames.get(c.type) ?? String(c.type),
+          type: typeNames.get(c.type) ?? runTypeNames?.get(c.type) ?? String(c.type),
         }));
 
         const durationMs = performance.now() - start;
