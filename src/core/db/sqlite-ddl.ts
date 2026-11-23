@@ -1,4 +1,4 @@
-import { type Token, tokenize } from "../sql/lexer";
+import type { Token } from "../sql/lexer";
 import type { RelationConstraint } from "./types";
 
 /**
@@ -39,55 +39,140 @@ function unquoteIdent(text: string): string {
   return text;
 }
 
+const BOM = "\uFEFF";
+
+function isSpace(ch: string): boolean {
+  return ch === " " || ch === "\t" || ch === "\n" || ch === "\r" || ch === "\f" || ch === "\v" || ch === BOM;
+}
+
+function isDigit(ch: string | undefined): boolean {
+  return ch !== undefined && ch >= "0" && ch <= "9";
+}
+
+function isHexDigit(ch: string | undefined): boolean {
+  return ch !== undefined && /[0-9A-Fa-f]/.test(ch);
+}
+
+/** SQLite's identifier characters: ASCII letters, digits, `_`, `$` and every non-ASCII character. */
+function isIdChar(ch: string | undefined): boolean {
+  return ch !== undefined && (/[A-Za-z0-9_$]/.test(ch) || ch.charCodeAt(0) >= 0x80);
+}
+
+const OPERATORS = ["->>", "->", "<<", ">>", "<=", ">=", "<>", "!=", "==", "||"];
+
+/** End of the token kind and extent starting at `i`, where `sql[i]` is not whitespace. */
+function scanToken(sql: string, i: number): { kind: Token["kind"]; end: number } {
+  const n = sql.length;
+  const ch = sql[i]!;
+  const next = sql[i + 1];
+  if (ch === "-" && next === "-") {
+    const nl = sql.indexOf("\n", i + 2);
+    return { kind: "comment", end: nl === -1 ? n : nl };
+  }
+  if (ch === "/" && next === "*") {
+    // SQLite block comments do not nest: one ends at its first `*/`.
+    const close = sql.indexOf("*/", i + 2);
+    return { kind: "comment", end: close === -1 ? n : close + 2 };
+  }
+  if (ch === "'" || ch === '"' || ch === "`") {
+    let j = i + 1;
+    for (;;) {
+      const close = sql.indexOf(ch, j);
+      if (close === -1) {
+        j = n;
+        break;
+      }
+      if (sql[close + 1] === ch) {
+        j = close + 2;
+        continue;
+      }
+      j = close + 1;
+      break;
+    }
+    return { kind: ch === "'" ? "string" : "quotedIdentifier", end: j };
+  }
+  if (ch === "[") {
+    const close = sql.indexOf("]", i + 1);
+    return { kind: "quotedIdentifier", end: close === -1 ? n : close + 1 };
+  }
+  if ((ch === "x" || ch === "X") && next === "'") {
+    const close = sql.indexOf("'", i + 2);
+    return { kind: "string", end: close === -1 ? n : close + 1 };
+  }
+  if (isDigit(ch) || (ch === "." && isDigit(next))) {
+    let j = i;
+    if (ch === "0" && (next === "x" || next === "X") && isHexDigit(sql[i + 2])) {
+      j += 2;
+      while (isHexDigit(sql[j])) j++;
+    } else {
+      while (isDigit(sql[j]) || sql[j] === "_") j++;
+      if (sql[j] === ".") {
+        j++;
+        while (isDigit(sql[j]) || sql[j] === "_") j++;
+      }
+      if (sql[j] === "e" || sql[j] === "E") {
+        let k = j + 1;
+        if (sql[k] === "+" || sql[k] === "-") k++;
+        if (isDigit(sql[k])) {
+          j = k;
+          while (isDigit(sql[j])) j++;
+        }
+      }
+    }
+    // SQLite reads letters glued to a number as part of one (bad) token.
+    while (isIdChar(sql[j])) j++;
+    return { kind: "number", end: j };
+  }
+  if (ch === "?") {
+    let j = i + 1;
+    while (isDigit(sql[j])) j++;
+    return { kind: "parameter", end: j };
+  }
+  if (ch === ":" || ch === "@" || ch === "$") {
+    let j = i + 1;
+    while (isIdChar(sql[j])) j++;
+    return { kind: "parameter", end: j };
+  }
+  if (isIdChar(ch)) {
+    // A byte order mark inside a word belongs to it; only at a token boundary is it whitespace.
+    let j = i + 1;
+    while (isIdChar(sql[j])) j++;
+    return { kind: "identifier", end: j };
+  }
+  if (ch === "(" || ch === ")" || ch === "," || ch === ";" || ch === "." || ch === "]") {
+    return { kind: "punctuation", end: i + 1 };
+  }
+  const op = OPERATORS.find((o) => sql.startsWith(o, i));
+  return { kind: "operator", end: i + (op?.length ?? 1) };
+}
+
 /**
- * Significant tokens of SQLite text. The shared lexer does not know SQLite's `[name]` identifiers,
- * so each one is read here up to its `]` and the lexer resumes after it. It also nests block
- * comments, which SQLite does not: a `/*` comment ends at its first `*\/`, and the lexer resumes
- * there.
+ * Significant tokens of SQLite text, read in one pass the way SQLite's own tokenizer reads them:
+ * `[name]` identifiers, block comments that end at their first `*\/`, and a byte order mark (U+FEFF)
+ * at a token boundary as whitespace. Offsets index the text as given.
  */
 function significantTokens(sql: string): Tok[] {
   const out: Tok[] = [];
-  let offset = 0;
-  outer: while (offset < sql.length) {
-    const tokens: Token[] = tokenize(sql.slice(offset));
-    for (const t of tokens) {
-      const start = t.start + offset;
-      const end = t.end + offset;
-      if (t.kind === "comment") {
-        if (sql.startsWith("/*", start)) {
-          const close = sql.indexOf("*/", start + 2);
-          const stop = close === -1 ? sql.length : close + 2;
-          if (stop !== end) {
-            offset = stop;
-            continue outer;
-          }
-        }
-        continue;
-      }
-      if (t.kind === "whitespace") continue;
-      const text = sql.slice(start, end);
-      if (t.kind === "punctuation" && text === "[") {
-        const close = sql.indexOf("]", start + 1);
-        const stop = close === -1 ? sql.length : close + 1;
-        const raw = sql.slice(start, stop);
-        out.push({ kind: "quotedIdentifier", start, end: stop, word: "", punct: "", ident: unquoteIdent(raw) });
-        offset = stop;
-        continue outer;
-      }
-      const isWord = /^[A-Za-z_\u0080-￿]/.test(text);
-      out.push({
-        kind: t.kind,
-        start,
-        end,
-        word: isWord ? asciiFold(text) : "",
-        punct: t.kind === "punctuation" ? text : "",
-        ident:
-          isWord || t.kind === "quotedIdentifier" || t.kind === "string"
-            ? unquoteIdent(text)
-            : null,
-      });
+  let i = 0;
+  while (i < sql.length) {
+    if (isSpace(sql[i]!)) {
+      i++;
+      continue;
     }
-    break;
+    const start = i;
+    const { kind, end } = scanToken(sql, start);
+    i = end;
+    if (kind === "comment") continue;
+    const text = sql.slice(start, end);
+    const isWord = kind === "identifier";
+    out.push({
+      kind,
+      start,
+      end,
+      word: isWord ? asciiFold(text) : "",
+      punct: kind === "punctuation" ? text : "",
+      ident: isWord || kind === "quotedIdentifier" || kind === "string" ? unquoteIdent(text) : null,
+    });
   }
   return out;
 }
@@ -237,21 +322,56 @@ function referencesClauseEnd(toks: Tok[], at: number, end: number): number {
 
 const TABLE_CONSTRAINT_WORDS = new Set(["constraint", "primary", "unique", "check", "foreign"]);
 
-function parseTableConstraint(
+/**
+ * Reads the table constraints in `toks[from..to)`. SQLite lets table constraints follow one another
+ * without commas, so each one ends where the next starts: at a constraint word outside parentheses
+ * (these words are reserved, so nothing else in a constraint can be spelled like one bare).
+ */
+function parseTableConstraints(
   sql: string,
   toks: Tok[],
   from: number,
   to: number,
   constraints: RelationConstraint[],
 ): void {
-  let i = from;
   let name: string | undefined;
-  if (toks[i]!.word === "constraint") {
-    const ident = toks[i + 1]?.ident;
-    if (ident === null || ident === undefined) return;
-    name = ident;
-    i += 2;
+  let i = from;
+  while (i < to) {
+    if (toks[i]!.word === "constraint") {
+      const ident = toks[i + 1]?.ident;
+      if (ident === null || ident === undefined) return;
+      name = ident;
+      i += 2;
+      continue;
+    }
+    if (!TABLE_CONSTRAINT_WORDS.has(toks[i]!.word)) return;
+    let end = to;
+    let depth = 0;
+    for (let k = i + 1; k < to; k++) {
+      const tok = toks[k]!;
+      if (tok.punct === "(") depth++;
+      else if (tok.punct === ")") depth--;
+      else if (depth === 0 && TABLE_CONSTRAINT_WORDS.has(tok.word)) {
+        end = k;
+        break;
+      }
+    }
+    parseTableConstraint(sql, toks, i, end, name, constraints);
+    name = undefined;
+    i = end;
   }
+}
+
+/** Reads the one table constraint `toks[from..to)`, after any `CONSTRAINT name`. */
+function parseTableConstraint(
+  sql: string,
+  toks: Tok[],
+  from: number,
+  to: number,
+  name: string | undefined,
+  constraints: RelationConstraint[],
+): void {
+  const i = from;
   const head = toks[i]?.word;
   const withName = (c: RelationConstraint): RelationConstraint => {
     if (name !== undefined) c.name = name;
@@ -259,10 +379,10 @@ function parseTableConstraint(
   };
   if (head === "primary" && toks[i + 1]?.word === "key") {
     const list = columnList(toks, i + 2);
-    if (list) constraints.push(withName({ kind: "PRIMARY KEY", columns: list.names }));
+    if (list && list.close < to) constraints.push(withName({ kind: "PRIMARY KEY", columns: list.names }));
   } else if (head === "unique") {
     const list = columnList(toks, i + 1);
-    if (list) constraints.push(withName({ kind: "UNIQUE", columns: list.names }));
+    if (list && list.close < to) constraints.push(withName({ kind: "UNIQUE", columns: list.names }));
   } else if (head === "check" && toks[i + 1]?.punct === "(") {
     const close = matchParen(toks, i + 1);
     if (close === -1 || close >= to) return;
@@ -271,7 +391,7 @@ function parseTableConstraint(
     );
   } else if (head === "foreign" && toks[i + 1]?.word === "key") {
     const list = columnList(toks, i + 2);
-    if (!list || toks[list.close + 1]?.word !== "references") return;
+    if (!list || list.close + 1 >= to || toks[list.close + 1]!.word !== "references") return;
     const references = readReferences(toks, list.close + 1, to);
     if (references) {
       constraints.push(withName({ kind: "FOREIGN KEY", columns: list.names, references }));
@@ -420,7 +540,7 @@ export function parseSqliteTableDdl(sql: string): {
         (first.word !== "foreign" || toks[from + 1]?.word === "key") &&
         (first.word !== "unique" && first.word !== "check" ? true : toks[from + 1]?.punct === "(");
       if (isTableConstraint) {
-        parseTableConstraint(sql, toks, from, to, constraints);
+        parseTableConstraints(sql, toks, from, to, constraints);
       } else {
         parseColumnDefinition(sql, toks, from, to, constraints, generated);
       }

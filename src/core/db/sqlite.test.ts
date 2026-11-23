@@ -3,6 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openSession, parseConnection } from "./connection";
+import { parseSqliteTableDdl } from "./sqlite-ddl";
 import { QueryError, type Driver } from "./types";
 
 let dir: string;
@@ -727,6 +728,62 @@ describe("describeRelation", () => {
     expect(idx("ix_paren").columns).toEqual(["(x + desc)"]);
     expect(idx("ix_neg").columns).toEqual(["-x"]);
     expect(idx("ix_paren_op").columns).toEqual(["(x) || desc collate nocase"]);
+  });
+
+  test("table constraints written without commas between them are each read", async () => {
+    await driver.run("create table adj_p (id integer primary key)");
+    await driver.run(`create table adj (
+      a int, b int, x int,
+      constraint c1 check (a > 0) constraint c2 check (b > 0) check (x <> 0),
+      constraint fk_del foreign key (a) references adj_p(id) on delete cascade constraint fk_upd foreign key (b) references adj_p(id) on update restrict
+    )`);
+
+    const details = await driver.describeRelation!({ namespace: "main", name: "adj" });
+    const checks = details!.constraints!.filter((c) => c.kind === "CHECK");
+    expect(checks.map((c) => [c.name, c.definition])).toEqual([
+      ["c1", "a > 0"],
+      ["c2", "b > 0"],
+      [undefined, "x <> 0"],
+    ]);
+    const fks = details!.constraints!.filter((c) => c.kind === "FOREIGN KEY");
+    const byName = (name: string) => fks.find((c) => c.name === name);
+    expect(byName("fk_del")?.columns).toEqual(["a"]);
+    expect(byName("fk_del")?.references).toMatchObject({ onDelete: "CASCADE", onUpdate: "NO ACTION" });
+    expect(byName("fk_upd")?.columns).toEqual(["b"]);
+    expect(byName("fk_upd")?.references).toMatchObject({ onDelete: "NO ACTION", onUpdate: "RESTRICT" });
+  });
+
+  test("a byte order mark (U+FEFF) between tokens is whitespace", async () => {
+    const bom = "﻿";
+    await driver.run(
+      `create table bom_t (${bom}a int, b int generated always as (${bom}a +${bom}(1)${bom}) virtual, check (${bom}a > 0)${bom})`,
+    );
+
+    const details = await driver.describeRelation!({ namespace: "main", name: "bom_t" });
+    expect(details!.columns.map((c) => c.name)).toEqual(["a", "b"]);
+    expect(details!.columns.find((c) => c.name === "b")!.generated).toBe("a +\uFEFF(1)");
+    expect(details!.constraints!.filter((c) => c.kind === "CHECK").map((c) => c.definition)).toEqual(["a > 0"]);
+  });
+
+  test("a table with many bracket-quoted columns and block comments is described", async () => {
+    const n = 1900;
+    const cols = Array.from({ length: n }, (_, i) => `[c ${i}] int /* col ${i} */`).join(", ");
+    await driver.run(`create table wide (${cols}, [g] int generated always as ([c 0] + [c ${n - 1}]) virtual, check ([c 1] > 0))`);
+
+    const details = await driver.describeRelation!({ namespace: "main", name: "wide" });
+    expect(details!.columns).toHaveLength(n + 1);
+    expect(details!.columns.find((c) => c.name === "g")!.generated).toBe(`[c 0] + [c ${n - 1}]`);
+    expect(details!.constraints!.filter((c) => c.kind === "CHECK").map((c) => c.definition)).toEqual(["[c 1] > 0"]);
+  });
+
+  test("stored table text is read in linear time", () => {
+    const n = 10000;
+    const cols = Array.from({ length: n }, (_, i) => `[c ${i}] int /* col ${i} */`).join(", ");
+    const started = performance.now();
+    const parsed = parseSqliteTableDdl(`create table wide (${cols}, [g] int as ([c 0] + [c ${n - 1}]))`);
+    const elapsed = performance.now() - started;
+    expect(parsed.generated.get("g")).toBe(`[c 0] + [c ${n - 1}]`);
+    expect(elapsed).toBeLessThan(1000);
   });
 
   test("an already aborted signal rejects with a cancellation error", async () => {
