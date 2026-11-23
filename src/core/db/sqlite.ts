@@ -4,6 +4,7 @@ import { classify, commandTag } from "../sql/classify";
 import { splitStatements } from "../sql/statements";
 import { normalizeSharedCell } from "./cells";
 import { seedDemo } from "./demo";
+import { parseSqliteIndexDdl, parseSqliteTableDdl } from "./sqlite-ddl";
 import {
   type Cell,
   type Column,
@@ -14,6 +15,12 @@ import {
   refuseNulCharacter,
   type Relation,
   type RelationColumn,
+  type RelationColumnDetail,
+  type RelationConstraint,
+  type RelationDetails,
+  type RelationForeignKeyRef,
+  type RelationIndex,
+  type RelationRef,
   type Result,
   type RunOptions,
   type SchemaSnapshot,
@@ -64,6 +71,259 @@ function toQueryError(err: unknown, isReadOnly = false): QueryError {
   return new QueryError(String(err));
 }
 
+type Num = number | bigint;
+
+interface XInfoRow {
+  cid: Num;
+  name: string;
+  type: string | null;
+  notnull: Num;
+  dflt_value: string | null;
+  pk: Num;
+  hidden: Num;
+}
+
+function sameName(a: string, b: string): boolean {
+  return a.toLowerCase() === b.toLowerCase();
+}
+
+function sameNames(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((name, i) => sameName(name, b[i]!));
+}
+
+/** The only parsed constraint that `matches`, or undefined when none or several do. */
+function uniqueMatch(
+  parsed: readonly RelationConstraint[],
+  matches: (c: RelationConstraint) => boolean,
+): RelationConstraint | undefined {
+  const found = parsed.filter(matches);
+  return found.length === 1 ? found[0] : undefined;
+}
+
+/**
+ * The Structure of one Relation, read from the catalog of `db`. PRAGMAs give the facts; the stored
+ * SQL adds constraint names, CHECK expressions, generated column expressions and index terms where
+ * it can be read, and the PRAGMA facts stand alone where it cannot.
+ */
+function describeSqliteRelation(db: Database, ref: RelationRef): RelationDetails | null {
+  const databases = db.query("pragma database_list").all() as { name: string }[];
+  const namespace = databases.find((d) => sameName(d.name, ref.namespace))?.name;
+  if (namespace === undefined) return null;
+  const ns = quoteIdent(namespace);
+  const catalog = sameName(namespace, "temp") ? "sqlite_temp_schema" : `${ns}.sqlite_schema`;
+
+  const relation = db
+    .query(
+      `select type, name, sql from ${catalog} where type in ('table', 'view') and name = ?1 collate nocase order by name = ?1 desc limit 1`,
+    )
+    .get(ref.name) as { type: "table" | "view"; name: string; sql: string | null } | null;
+  if (!relation) return null;
+  const name = relation.name;
+  const rel = quoteIdent(name);
+  const definition = relation.sql ?? undefined;
+
+  const xinfo = (table: string) =>
+    (db.query(`pragma ${ns}.table_xinfo(${quoteIdent(table)})`).all() as XInfoRow[]).filter(
+      (c) => Number(c.hidden) !== 1,
+    );
+  const colRows = xinfo(name);
+
+  if (relation.type === "view") {
+    const columns = colRows.map(
+      (c): RelationColumnDetail => ({
+        name: c.name,
+        type: (c.type ?? "").toLowerCase(),
+        nullable: Number(c.notnull) === 0,
+        references: [],
+      }),
+    );
+    const details: RelationDetails = { namespace, name, kind: "view", columns, indexes: [], constraints: [] };
+    if (definition !== undefined) details.definition = definition;
+    return details;
+  }
+
+  const parsed = definition !== undefined ? parseSqliteTableDdl(definition) : { constraints: [], generated: new Map<string, string>() };
+
+  // Indexes, read first: a declared PRIMARY KEY that SQLite backs with an index is no rowid alias.
+  const indexList = db.query(`pragma ${ns}.index_list(${rel})`).all() as {
+    name: string;
+    unique: Num;
+    origin: string;
+    partial: Num;
+  }[];
+  const indexes: RelationIndex[] = [];
+  const uniqueConstraints: RelationConstraint[] = [];
+  for (const idx of indexList) {
+    const keyRows = (
+      db.query(`pragma ${ns}.index_xinfo(${quoteIdent(idx.name)})`).all() as {
+        seqno: Num;
+        cid: Num;
+        name: string | null;
+        key: Num;
+      }[]
+    )
+      .filter((k) => Number(k.key) === 1)
+      .sort((a, b) => Number(a.seqno) - Number(b.seqno));
+    const indexSql = (
+      db.query(`select sql from ${catalog} where type = 'index' and name = ?1`).get(idx.name) as
+        | { sql: string | null }
+        | null
+    )?.sql;
+    const parsedIndex = indexSql ? parseSqliteIndexDdl(indexSql) : { terms: [] as string[] };
+    const columns = keyRows.map((k) => {
+      const cid = Number(k.cid);
+      if (cid === -2) return parsedIndex.terms[Number(k.seqno)] ?? "";
+      if (cid === -1) return "rowid";
+      return k.name ?? "";
+    });
+    const index: RelationIndex = {
+      name: idx.name,
+      unique: Boolean(Number(idx.unique)),
+      primary: idx.origin === "pk",
+      columns,
+    };
+    if (parsedIndex.predicate !== undefined) index.predicate = parsedIndex.predicate;
+    if (indexSql) index.definition = indexSql;
+    indexes.push(index);
+
+    if (idx.origin === "u") {
+      const unique: RelationConstraint = { kind: "UNIQUE", columns };
+      const match = uniqueMatch(
+        parsed.constraints,
+        (c) => c.kind === "UNIQUE" && sameNames(c.columns, columns),
+      );
+      if (match?.name !== undefined) unique.name = match.name;
+      uniqueConstraints.push(unique);
+    }
+  }
+
+  let withoutRowid = false;
+  try {
+    const row = db.query(`pragma ${ns}.table_list(${rel})`).get() as { wr?: Num } | null;
+    withoutRowid = Number(row?.wr ?? 0) === 1;
+  } catch {
+    // SQLite before 3.37 has no table_list: read the table options from the stored SQL.
+    withoutRowid = definition !== undefined && /\)\s*[^)]*\bwithout\s+rowid\b[^)]*$/i.test(definition);
+  }
+
+  const pkRows = colRows.filter((c) => Number(c.pk) > 0).sort((a, b) => Number(a.pk) - Number(b.pk));
+  const isRowidAlias =
+    !withoutRowid &&
+    pkRows.length === 1 &&
+    (pkRows[0]!.type ?? "").toUpperCase() === "INTEGER" &&
+    !indexList.some((i) => i.origin === "pk");
+
+  // Foreign keys, grouped by id, each group in declared column order.
+  const fkRows = db.query(`pragma ${ns}.foreign_key_list(${rel})`).all() as {
+    id: Num;
+    seq: Num;
+    table: string;
+    from: string;
+    to: string | null;
+    on_update: string;
+    on_delete: string;
+  }[];
+  const groups = new Map<number, typeof fkRows>();
+  for (const row of fkRows) {
+    const id = Number(row.id);
+    const group = groups.get(id) ?? [];
+    group.push(row);
+    groups.set(id, group);
+  }
+  const parentKeys = new Map<string, string[]>();
+  const parentKey = (table: string): string[] => {
+    const key = table.toLowerCase();
+    let cols = parentKeys.get(key);
+    if (!cols) {
+      cols = xinfo(table)
+        .filter((c) => Number(c.pk) > 0)
+        .sort((a, b) => Number(a.pk) - Number(b.pk))
+        .map((c) => c.name);
+      parentKeys.set(key, cols);
+    }
+    return cols;
+  };
+  const fkConstraints: RelationConstraint[] = [];
+  const refsByColumn = new Map<string, RelationForeignKeyRef[]>();
+  for (const id of [...groups.keys()].sort((a, b) => a - b)) {
+    const group = groups.get(id)!.sort((a, b) => Number(a.seq) - Number(b.seq));
+    const first = group[0]!;
+    const from = group.map((r) => r.from);
+    let to: string[];
+    if (group.every((r) => r.to !== null)) {
+      to = group.map((r) => r.to!);
+    } else {
+      const pk = parentKey(first.table);
+      to = pk.length === group.length ? pk : group.map(() => "");
+    }
+    const declaredTargets = group.every((r) => r.to !== null) ? to : [];
+    const match = uniqueMatch(
+      parsed.constraints,
+      (c) =>
+        c.kind === "FOREIGN KEY" &&
+        c.references !== undefined &&
+        sameName(c.references.relation, first.table) &&
+        sameNames(c.columns, from) &&
+        sameNames(c.references.columns, declaredTargets),
+    );
+    const constraint: RelationConstraint = {
+      kind: "FOREIGN KEY",
+      columns: from,
+      references: { relation: first.table, columns: to, onUpdate: first.on_update, onDelete: first.on_delete },
+    };
+    if (match?.name !== undefined) constraint.name = match.name;
+    fkConstraints.push(constraint);
+    group.forEach((r, i) => {
+      const fkRef: RelationForeignKeyRef = {
+        relation: first.table,
+        column: to[i]!,
+        onUpdate: first.on_update,
+        onDelete: first.on_delete,
+      };
+      if (constraint.name !== undefined) fkRef.constraintName = constraint.name;
+      const key = r.from.toLowerCase();
+      refsByColumn.set(key, [...(refsByColumn.get(key) ?? []), fkRef]);
+    });
+  }
+
+  const columns = colRows.map((c): RelationColumnDetail => {
+    const pk = Number(c.pk);
+    const column: RelationColumnDetail = {
+      name: c.name,
+      type: (c.type ?? "").toLowerCase(),
+      nullable: Number(c.notnull) === 0 && !(pk > 0 && (withoutRowid || isRowidAlias)),
+      references: refsByColumn.get(c.name.toLowerCase()) ?? [],
+    };
+    if (c.dflt_value !== null) column.defaultValue = String(c.dflt_value);
+    if (pk > 0) column.primaryKeyPosition = pk;
+    const hidden = Number(c.hidden);
+    if (hidden === 2 || hidden === 3) {
+      column.generated = parsed.generated.get(c.name.toLowerCase()) ?? (hidden === 2 ? "VIRTUAL" : "STORED");
+    }
+    return column;
+  });
+
+  const constraints: RelationConstraint[] = [];
+  if (pkRows.length > 0) {
+    const pkColumns = pkRows.map((c) => c.name);
+    const primary: RelationConstraint = { kind: "PRIMARY KEY", columns: pkColumns };
+    const match = uniqueMatch(
+      parsed.constraints,
+      (c) => c.kind === "PRIMARY KEY" && sameNames(c.columns, pkColumns),
+    );
+    if (match?.name !== undefined) primary.name = match.name;
+    constraints.push(primary);
+  }
+  constraints.push(...uniqueConstraints, ...fkConstraints);
+  for (const check of parsed.constraints) {
+    if (check.kind === "CHECK") constraints.push(check);
+  }
+
+  const details: RelationDetails = { namespace, name, kind: "table", columns, indexes, constraints };
+  if (definition !== undefined) details.definition = definition;
+  return details;
+}
+
 export function openSqlite(connection: Connection, options?: { create?: boolean }): Driver {
   let db: Database | null = null;
   let roDb: Database | null = null;
@@ -96,6 +356,7 @@ export function openSqlite(connection: Connection, options?: { create?: boolean 
   }
 
   const mainDb = db;
+  let closed = false;
 
   function resolveDuplicateColumnNames(
     handle: Database,
@@ -360,7 +621,23 @@ export function openSqlite(connection: Connection, options?: { create?: boolean 
       }
     },
 
+    async describeRelation(
+      ref: RelationRef,
+      describeOpts?: { signal?: AbortSignal },
+    ): Promise<RelationDetails | null> {
+      if (closed) throw new QueryError("the Session is closed");
+      if (describeOpts?.signal?.aborted) {
+        throw new QueryError("canceling statement due to user request");
+      }
+      try {
+        return describeSqliteRelation(mainDb, ref);
+      } catch (err) {
+        throw toQueryError(err);
+      }
+    },
+
     async close(): Promise<void> {
+      closed = true;
       try {
         if (roDb) {
           roDb.close();
