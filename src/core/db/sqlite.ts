@@ -4,7 +4,7 @@ import { classify, commandTag } from "../sql/classify";
 import { splitStatements } from "../sql/statements";
 import { normalizeSharedCell } from "./cells";
 import { seedDemo } from "./demo";
-import { parseSqliteIndexDdl, parseSqliteTableDdl } from "./sqlite-ddl";
+import { asciiFold, parseSqliteIndexDdl, parseSqliteTableDdl } from "./sqlite-ddl";
 import {
   type Cell,
   type Column,
@@ -83,8 +83,14 @@ interface XInfoRow {
   hidden: Num;
 }
 
+/** SQLite compares identifiers ignoring the case of ASCII letters only. */
 function sameName(a: string, b: string): boolean {
-  return a.toLowerCase() === b.toLowerCase();
+  return asciiFold(a) === asciiFold(b);
+}
+
+/** A foreign key action as `pragma foreign_key_list` reports it; an omitted one is NO ACTION. */
+function fkAction(action: string | undefined): string {
+  return action === undefined ? "NO ACTION" : action.toUpperCase();
 }
 
 function sameNames(a: readonly string[], b: readonly string[]): boolean {
@@ -210,7 +216,7 @@ function describeSqliteRelation(db: Database, ref: RelationRef): RelationDetails
   const isRowidAlias =
     !withoutRowid &&
     pkRows.length === 1 &&
-    (pkRows[0]!.type ?? "").toUpperCase() === "INTEGER" &&
+    asciiFold(pkRows[0]!.type ?? "") === "integer" &&
     !indexList.some((i) => i.origin === "pk");
 
   // Foreign keys, grouped by id, each group in declared column order.
@@ -231,14 +237,25 @@ function describeSqliteRelation(db: Database, ref: RelationRef): RelationDetails
     groups.set(id, group);
   }
   const parentKeys = new Map<string, string[]>();
+  // The primary key of a parent table; empty when the parent is no table or cannot be read.
   const parentKey = (table: string): string[] => {
-    const key = table.toLowerCase();
+    const key = asciiFold(table);
     let cols = parentKeys.get(key);
     if (!cols) {
-      cols = xinfo(table)
-        .filter((c) => Number(c.pk) > 0)
-        .sort((a, b) => Number(a.pk) - Number(b.pk))
-        .map((c) => c.name);
+      cols = [];
+      try {
+        const parent = db
+          .query(`select name from ${catalog} where type = 'table' and name = ?1 collate nocase`)
+          .get(table) as { name: string } | null;
+        if (parent) {
+          cols = xinfo(parent.name)
+            .filter((c) => Number(c.pk) > 0)
+            .sort((a, b) => Number(a.pk) - Number(b.pk))
+            .map((c) => c.name);
+        }
+      } catch {
+        // An unreadable parent has no known key.
+      }
       parentKeys.set(key, cols);
     }
     return cols;
@@ -264,7 +281,9 @@ function describeSqliteRelation(db: Database, ref: RelationRef): RelationDetails
         c.references !== undefined &&
         sameName(c.references.relation, first.table) &&
         sameNames(c.columns, from) &&
-        sameNames(c.references.columns, declaredTargets),
+        sameNames(c.references.columns, declaredTargets) &&
+        fkAction(c.references.onUpdate) === fkAction(first.on_update) &&
+        fkAction(c.references.onDelete) === fkAction(first.on_delete),
     );
     const constraint: RelationConstraint = {
       kind: "FOREIGN KEY",
@@ -281,7 +300,7 @@ function describeSqliteRelation(db: Database, ref: RelationRef): RelationDetails
         onDelete: first.on_delete,
       };
       if (constraint.name !== undefined) fkRef.constraintName = constraint.name;
-      const key = r.from.toLowerCase();
+      const key = asciiFold(r.from);
       refsByColumn.set(key, [...(refsByColumn.get(key) ?? []), fkRef]);
     });
   }
@@ -292,13 +311,13 @@ function describeSqliteRelation(db: Database, ref: RelationRef): RelationDetails
       name: c.name,
       type: (c.type ?? "").toLowerCase(),
       nullable: Number(c.notnull) === 0 && !(pk > 0 && (withoutRowid || isRowidAlias)),
-      references: refsByColumn.get(c.name.toLowerCase()) ?? [],
+      references: refsByColumn.get(asciiFold(c.name)) ?? [],
     };
     if (c.dflt_value !== null) column.defaultValue = String(c.dflt_value);
     if (pk > 0) column.primaryKeyPosition = pk;
     const hidden = Number(c.hidden);
     if (hidden === 2 || hidden === 3) {
-      column.generated = parsed.generated.get(c.name.toLowerCase()) ?? (hidden === 2 ? "VIRTUAL" : "STORED");
+      column.generated = parsed.generated.get(asciiFold(c.name)) ?? (hidden === 2 ? "VIRTUAL" : "STORED");
     }
     return column;
   });

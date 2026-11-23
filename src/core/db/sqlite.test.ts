@@ -600,6 +600,86 @@ describe("describeRelation", () => {
     expect(await driver.describeRelation!({ namespace: "other", name: "people" })).toBeNull();
   });
 
+  test("named foreign keys on the same columns and target are told apart by their actions", async () => {
+    await driver.run("create table parent2 (a integer primary key)");
+    await driver.run(`create table twin_fk (
+      x integer,
+      constraint fk_del foreign key (x) references parent2(a) on delete cascade,
+      constraint fk_upd foreign key (x) references parent2(a) on update restrict
+    )`);
+
+    const details = await driver.describeRelation!({ namespace: "main", name: "twin_fk" });
+    const fks = details!.constraints!.filter((c) => c.kind === "FOREIGN KEY");
+    expect(fks).toHaveLength(2);
+    const byName = (name: string) => fks.find((c) => c.name === name)!;
+    expect(byName("fk_del").references).toMatchObject({ onDelete: "CASCADE", onUpdate: "NO ACTION" });
+    expect(byName("fk_upd").references).toMatchObject({ onDelete: "NO ACTION", onUpdate: "RESTRICT" });
+    const x = details!.columns.find((c) => c.name === "x")!;
+    expect(x.references.map((r) => r.constraintName).sort()).toEqual(["fk_del", "fk_upd"]);
+  });
+
+  test("an implicit foreign key to a broken view leaves the target column empty", async () => {
+    await driver.run("create table gone (id integer primary key)");
+    await driver.run("create view broken_v as select * from gone");
+    await driver.run("drop table gone");
+    await driver.run("create table to_view (x integer references broken_v)");
+
+    const details = await driver.describeRelation!({ namespace: "main", name: "to_view" });
+    const x = details!.columns.find((c) => c.name === "x")!;
+    expect(x.references).toHaveLength(1);
+    expect(x.references[0]).toMatchObject({ relation: "broken_v", column: "" });
+  });
+
+  test("identifiers differing only by non-ASCII case stay distinct", async () => {
+    await driver.run(`create table uni (
+      "À" integer references teams(id),
+      "à" integer,
+      "É" int generated always as (1) virtual,
+      "é" int generated always as (2) virtual
+    )`);
+
+    const details = await driver.describeRelation!({ namespace: "main", name: "uni" });
+    const col = (name: string) => details!.columns.find((c) => c.name === name)!;
+    expect(col("À").references).toHaveLength(1);
+    expect(col("à").references).toEqual([]);
+    expect(col("É").generated).toBe("1");
+    expect(col("é").generated).toBe("2");
+
+    await driver.run("attach ':memory:' as \"Ä\"");
+    await driver.run('create table "Ä".only_upper (id integer)');
+    expect(await driver.describeRelation!({ namespace: "ä", name: "only_upper" })).toBeNull();
+    expect(await driver.describeRelation!({ namespace: "Ä", name: "only_upper" })).not.toBeNull();
+  });
+
+  test("a block comment ends at its first */ and later checks are still read", async () => {
+    await driver.run("create table cm (a int /* /* */, b int check (b < 5), check (a > 0))");
+
+    const details = await driver.describeRelation!({ namespace: "main", name: "cm" });
+    const checks = details!.constraints!.filter((c) => c.kind === "CHECK");
+    expect(checks.map((c) => c.definition)).toEqual(["b < 5", "a > 0"]);
+  });
+
+  test("virtual table module arguments are not read as table constraints", async () => {
+    await driver.run("create virtual table vt_fts using fts3(body, check (body > 0))");
+
+    const details = await driver.describeRelation!({ namespace: "main", name: "vt_fts" });
+    expect(details).not.toBeNull();
+    expect(details!.constraints!.filter((c) => c.kind === "CHECK")).toEqual([]);
+  });
+
+  test("index terms keep operands named asc or desc and collations inside expressions", async () => {
+    await driver.run("create table ix_t (x int, desc int)");
+    await driver.run("create index ix_plus on ix_t(x + desc)");
+    await driver.run("create index ix_concat on ix_t(x || desc collate nocase desc)");
+    await driver.run("create index ix_call on ix_t(lower(x) collate nocase desc)");
+
+    const details = await driver.describeRelation!({ namespace: "main", name: "ix_t" });
+    const idx = (name: string) => details!.indexes!.find((i) => i.name === name)!;
+    expect(idx("ix_plus").columns).toEqual(["x + desc"]);
+    expect(idx("ix_concat").columns).toEqual(["x || desc collate nocase"]);
+    expect(idx("ix_call").columns).toEqual(["lower(x)"]);
+  });
+
   test("an already aborted signal rejects with a cancellation error", async () => {
     const controller = new AbortController();
     controller.abort();

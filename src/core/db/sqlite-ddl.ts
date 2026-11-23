@@ -8,7 +8,13 @@ import type { RelationConstraint } from "./types";
  * throws: text it cannot read yields fewer facts, never an error.
  */
 
+/** SQLite's own case folding of identifiers and keywords: ASCII letters only. */
+export function asciiFold(s: string): string {
+  return s.replace(/[A-Z]/g, (c) => c.toLowerCase());
+}
+
 interface Tok {
+  kind: Token["kind"];
   start: number;
   end: number;
   /** Lowercased text of a bare word; "" for anything else. */
@@ -35,7 +41,9 @@ function unquoteIdent(text: string): string {
 
 /**
  * Significant tokens of SQLite text. The shared lexer does not know SQLite's `[name]` identifiers,
- * so each one is read here up to its `]` and the lexer resumes after it.
+ * so each one is read here up to its `]` and the lexer resumes after it. It also nests block
+ * comments, which SQLite does not: a `/*` comment ends at its first `*\/`, and the lexer resumes
+ * there.
  */
 function significantTokens(sql: string): Tok[] {
   const out: Tok[] = [];
@@ -43,23 +51,35 @@ function significantTokens(sql: string): Tok[] {
   outer: while (offset < sql.length) {
     const tokens: Token[] = tokenize(sql.slice(offset));
     for (const t of tokens) {
-      if (t.kind === "whitespace" || t.kind === "comment") continue;
       const start = t.start + offset;
       const end = t.end + offset;
+      if (t.kind === "comment") {
+        if (sql.startsWith("/*", start)) {
+          const close = sql.indexOf("*/", start + 2);
+          const stop = close === -1 ? sql.length : close + 2;
+          if (stop !== end) {
+            offset = stop;
+            continue outer;
+          }
+        }
+        continue;
+      }
+      if (t.kind === "whitespace") continue;
       const text = sql.slice(start, end);
       if (t.kind === "punctuation" && text === "[") {
         const close = sql.indexOf("]", start + 1);
         const stop = close === -1 ? sql.length : close + 1;
         const raw = sql.slice(start, stop);
-        out.push({ start, end: stop, word: "", punct: "", ident: unquoteIdent(raw) });
+        out.push({ kind: "quotedIdentifier", start, end: stop, word: "", punct: "", ident: unquoteIdent(raw) });
         offset = stop;
         continue outer;
       }
       const isWord = /^[A-Za-z_\u0080-￿]/.test(text);
       out.push({
+        kind: t.kind,
         start,
         end,
-        word: isWord ? text.toLowerCase() : "",
+        word: isWord ? asciiFold(text) : "",
         punct: t.kind === "punctuation" ? text : "",
         ident:
           isWord || t.kind === "quotedIdentifier" || t.kind === "string"
@@ -340,7 +360,7 @@ function parseColumnDefinition(
           const close = matchParen(toks, i + 1);
           if (close === -1) return;
           take();
-          generated.set(column.toLowerCase(), sliceBetween(sql, toks, i + 2, close));
+          generated.set(asciiFold(column), sliceBetween(sql, toks, i + 2, close));
           i = close + 1;
           continue;
         }
@@ -365,8 +385,15 @@ export function parseSqliteTableDdl(sql: string): {
   const generated = new Map<string, string>();
   try {
     const toks = significantTokens(sql);
+    // Only an ordinary `CREATE [TEMP|TEMPORARY] TABLE` declares columns and constraints; the
+    // arguments of `CREATE VIRTUAL TABLE ... USING module(...)` belong to the module.
+    let head = 0;
+    if (toks[head]?.word !== "create") return { constraints, generated };
+    head++;
+    if (toks[head]?.word === "temp" || toks[head]?.word === "temporary") head++;
+    if (toks[head]?.word !== "table") return { constraints, generated };
     let open = -1;
-    for (let i = 0; i < toks.length; i++) {
+    for (let i = head + 1; i < toks.length; i++) {
       if (toks[i]!.word === "as" && open === -1) return { constraints, generated };
       if (toks[i]!.punct === "(") {
         open = i;
@@ -398,6 +425,52 @@ export function parseSqliteTableDdl(sql: string): {
   return { constraints, generated };
 }
 
+/** Words that join or prefix operands, so a word after one of them is itself an operand. */
+const OPERATOR_WORDS = new Set([
+  "and",
+  "or",
+  "not",
+  "is",
+  "in",
+  "like",
+  "glob",
+  "regexp",
+  "match",
+  "between",
+  "escape",
+  "collate",
+  "isnull",
+  "notnull",
+  "case",
+  "when",
+  "then",
+  "else",
+  "distinct",
+  "from",
+]);
+
+/** Whether `tok` can end an expression, so an `ASC`/`DESC` after it is a sort order. */
+function endsOperand(tok: Tok): boolean {
+  if (tok.punct === ")") return true;
+  if (tok.kind === "number") return true;
+  return tok.ident !== null && !OPERATOR_WORDS.has(tok.word);
+}
+
+/**
+ * Whether `toks[from..to)` holds an operator at depth zero. `COLLATE` binds tighter than every
+ * binary operator, so a trailing `COLLATE name` after one belongs to its right operand.
+ */
+function hasTopLevelOperator(toks: Tok[], from: number, to: number): boolean {
+  let depth = 0;
+  for (let i = from; i < to; i++) {
+    const tok = toks[i]!;
+    if (tok.punct === "(") depth++;
+    else if (tok.punct === ")") depth--;
+    else if (depth === 0 && (tok.kind === "operator" || OPERATOR_WORDS.has(tok.word))) return true;
+  }
+  return false;
+}
+
 export function parseSqliteIndexDdl(sql: string): { terms: string[]; predicate?: string } {
   const result: { terms: string[]; predicate?: string } = { terms: [] };
   try {
@@ -411,9 +484,21 @@ export function parseSqliteIndexDdl(sql: string): { terms: string[]; predicate?:
     if (close === -1) return result;
     for (const [from, to] of splitTopLevel(toks, open + 1, close)) {
       let end = to;
-      // Order and collation are reported apart from the term itself.
-      if (end - 1 > from && (toks[end - 1]!.word === "asc" || toks[end - 1]!.word === "desc")) end--;
-      if (end - 2 > from && toks[end - 2]!.word === "collate") end -= 2;
+      // Order and a top-level collation are reported apart from the term itself.
+      if (
+        end - 1 > from &&
+        (toks[end - 1]!.word === "asc" || toks[end - 1]!.word === "desc") &&
+        endsOperand(toks[end - 2]!)
+      ) {
+        end--;
+      }
+      if (
+        end - 2 > from &&
+        toks[end - 2]!.word === "collate" &&
+        !hasTopLevelOperator(toks, from + 1, end - 2)
+      ) {
+        end -= 2;
+      }
       result.terms.push(sliceBetween(sql, toks, from, end));
     }
     if (toks[close + 1]?.word === "where") {
