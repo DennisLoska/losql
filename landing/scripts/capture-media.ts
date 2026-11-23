@@ -7,6 +7,8 @@ import { createHash } from "node:crypto";
 import { chmod, copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { Database } from "bun:sqlite";
+import { seedDemo } from "../../src/core/db/demo";
 
 const root = resolve(import.meta.dir, "../..");
 const media = join(root, "landing/public/media");
@@ -90,8 +92,11 @@ let browser: { close(): Promise<void> } | undefined;
 try {
   await mkdir(media, { recursive: true });
   await mkdir(fonts, { recursive: true });
-  for (const file of ["PlusJakartaSans-latin.woff2", "JetBrainsMono-latin.woff2", "OFL-PlusJakartaSans.txt", "OFL-JetBrainsMono.txt"]) {
-    await copyFile(join(process.env.CAPTURE_FONT_SOURCE ?? "/home/dennis/work/musy/public/fonts", file), join(fonts, file));
+  // The checked-in fonts are used unless an external source is supplied.
+  if (process.env.CAPTURE_FONT_SOURCE) {
+    for (const file of ["PlusJakartaSans-latin.woff2", "JetBrainsMono-latin.woff2", "OFL-PlusJakartaSans.txt", "OFL-JetBrainsMono.txt"]) {
+      await copyFile(join(process.env.CAPTURE_FONT_SOURCE, file), join(fonts, file));
+    }
   }
   await run(["bun", "run", "build"]);
   const binarySha256 = sha(await readFile(join(root, "losql")));
@@ -102,7 +107,29 @@ try {
   const sourceTheme = process.env.CAPTURE_OMARCHY_COLORS ?? "/home/dennis/.local/state/omarchy/current/theme/colors.toml";
   const fallbackTheme = `mode = "dark"\naccent = "#b86a66"\nselection = "#2c292a"\nselection_foreground = "#141112"\nmuted = "#716a6d"\nbackground = "#141112"\ndark_background = "#0f0d0e"\ndarker_background = "#0a0909"\nlighter_background = "#2c292a"\nforeground = "#F9E9CC"\ndark_foreground = "#bbaf99"\nlight_foreground = "#faecd4"\nbright_foreground = "#fbefd9"\nred = "#c48a62"\nyellow = "#ffe98d"\norange = "#cd9c7a"\ngreen = "#e9bf6f"\ncyan = "#f8dd67"\nblue = "#b86a66"\nmagenta = "#f09376"\nbrown = "#7b5e49"\nbright_red = "#e59b69"\nbright_yellow = "#ffe168"\nbright_green = "#ffd466"\nbright_cyan = "#fff156"\nbright_blue = "#d87975"\nbright_magenta = "#ffa17b"\n`;
   await writeFile(join(themeDir, "colors.toml"), await readFile(sourceTheme, "utf8").catch(() => fallbackTheme));
-  await writeFile(join(config, "config.json"), JSON.stringify({ agent: { provider: "opencode", model: "default" }, animations: false }));
+  // The bundled demo data in a capture-only SQLite file whose orders table also has defaults, a
+  // named check, a named foreign key and an index, so Structure shows every section populated.
+  // A saved Connection named "demo" takes precedence over the built-in demo database.
+  const demoDb = join(work, "demo.db");
+  const db = new Database(demoDb, { create: true });
+  seedDemo(db);
+  db.exec(`
+    pragma foreign_keys = off;
+    create table orders_capture (
+      id integer primary key,
+      customer_id integer not null
+        constraint fk_orders_customer references customers(id) on delete cascade,
+      status text not null default 'pending'
+        constraint orders_status_check check (status in ('pending', 'shipped', 'delivered', 'cancelled')),
+      ordered_at text not null default current_timestamp
+    );
+    insert into orders_capture (id, customer_id, status, ordered_at) select id, customer_id, status, ordered_at from orders;
+    drop table orders;
+    alter table orders_capture rename to orders;
+    create index idx_orders_customer_status on orders(customer_id, status);
+  `);
+  db.close();
+  await writeFile(join(config, "config.json"), JSON.stringify({ agent: { provider: "opencode", model: "default" }, animations: false, connections: [{ name: "demo", url: demoDb }] }));
   const revenue = `select c.name, c.country,\n       round(sum(i.quantity * i.unit_price), 2)\n         as revenue\nfrom customers c\njoin orders o on o.customer_id = c.id\njoin order_items i on i.order_id = o.id\ngroup by c.id\norder by revenue desc;`;
   // These executables never connect to a provider. OpenCode's actual stream
   // envelope wraps protocol actions consumed by the application's real loop.
@@ -155,7 +182,12 @@ console.log(JSON.stringify({type:'text',part:{text:JSON.stringify(actions[Math.m
   await focus("j"); await keys("Tab"); await capture("json", '"name":');
   await keys("Tab"); await capture("record", "row 1 of 8");
   await keys("Tab", "Space", "z"); await capture("zoom", "RESULTS");
-  await keys("Space", "z"); await focus("k");
+  await keys("Space", "z");
+  // Structure replaces the Result view until q returns to the Table with the same Result.
+  // Zoomed, the Columns section has room for every column, references included.
+  await command("inspect orders"); await waitFor("Constraints ("); await keys("Space", "z");
+  await capture("structure", "1 idx"); await keys("Space", "z");
+  await keys("q"); await waitFor("8 rows"); await focus("k");
   await keys("G", "o"); await text("select * from cu"); await keys("C-n");
   await waitFor("INSERT"); await capture("editor", "table");
   await keys("Escape", "Escape", "u");
@@ -197,13 +229,13 @@ pre{margin:0;padding:16px;font:16px/21px mono;font-variant-ligatures:none;white-
     });
     await page.screenshot({ path: join(work, `${name}.png`) });
   }
-  const statics = ["hero", "editor", "agent", "json", "record", "zoom", "providers", "themes", "menu", "onboarding", "omarchy", "omarchy-transparent"];
+  const statics = ["hero", "editor", "agent", "json", "record", "structure", "zoom", "providers", "themes", "menu", "onboarding", "omarchy", "omarchy-transparent"];
   for (const name of statics) {
     await run(["magick", join(work, `${name}.png`), "-quality", "88", join(media, `${name}.webp`)]);
     if (!name.startsWith("omarchy")) await copyFile(join(media, `${name}.webp`), join(root, "readme", `${name}.webp`));
   }
   const sequences: Record<string, string[]> = {
-    "workflow-tour": ["hero", "editor", "json", "agent", "themes", "omarchy"],
+    "workflow-tour": ["hero", "editor", "json", "structure", "agent", "themes", "omarchy"],
     "recording-vim": ["hero", "editor", "agent-run", "json", "record", "zoom"],
     "recording-agent": ["agent-open", "agent-question", "agent-describe", "agent-step", "agent", "agent-accepted", "agent-run"],
     "recording-omarchy": ["themes", "omarchy", "omarchy-transparent", "catppuccin", "nord", "tokyonight"],

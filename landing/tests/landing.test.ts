@@ -218,7 +218,7 @@ describe("landing/build.mjs and page content", () => {
       expect(groups).toHaveLength(4);
       const required = [
         ["Recorded workflows", 3],
-        ["Product tour stops", 9],
+        ["Product tour stops", 10],
         ["Omarchy and Theme previews", 4],
         ["Headless commands", 3],
       ] as const;
@@ -259,6 +259,38 @@ describe("landing/build.mjs and page content", () => {
         expect(page.activeElement).toBe(tabs[0]!);
       }
 
+      // The tenth tour stop adds Structure inspection alongside the existing stops.
+      const tour = groups.find(
+        (item) => item.querySelector('[role="tablist"]').getAttribute("aria-label") === "Product tour stops",
+      )!;
+      const tourTabs = tour.querySelectorAll('[role="tab"]');
+      expect(tourTabs.map((tab) => tab.textContent).at(-1)).toBe("Structure");
+      const structureTab = document.getElementById("tour-stop-tab-9");
+      const structurePanel = document.getElementById("tour-stop-panel-9");
+      expect(structureTab.getAttribute("aria-controls")).toBe("tour-stop-panel-9");
+      expect(structurePanel.getAttribute("aria-labelledby")).toBe("tour-stop-tab-9");
+      const structureImage = structurePanel.querySelector(".zoomable img");
+      expect(structureImage.getAttribute("src")).toBe("/media/structure.webp");
+      expect(structureImage.getAttribute("width")).toBe("1480");
+      expect(structureImage.getAttribute("height")).toBe("980");
+      expect(structurePanel.querySelector(".zoomable").getAttribute("aria-label")?.startsWith("Enlarge:")).toBe(true);
+      const structureKeys = structurePanel.querySelectorAll("kbd").map((key) => key.textContent);
+      expect(structureKeys).toContain("S");
+      expect(structureKeys.some((key) => /^(?:space|<leader>) v s$/i.test(key))).toBe(true);
+      document.getElementById("tour-stop-tab-8").keydown("ArrowRight");
+      expect(structureTab.getAttribute("aria-selected")).toBe("true");
+      expect(structurePanel.hidden).toBe(false);
+      expect(document.getElementById("tour-stop-panel-8").hidden).toBe(true);
+      expect(page.activeElement).toBe(structureTab);
+      document.getElementById("tour-stop-tab-0").keydown("End");
+      expect(structureTab.getAttribute("aria-selected")).toBe("true");
+      expect(structurePanel.hidden).toBe(false);
+      expect(page.activeElement).toBe(structureTab);
+      structureTab.keydown("Home");
+      expect(document.getElementById("tour-stop-tab-0").getAttribute("aria-selected")).toBe("true");
+      expect(structurePanel.hidden).toBe(true);
+      expect(page.activeElement).toBe(document.getElementById("tour-stop-tab-0"));
+
       const hero = document.getElementById("hero");
       expect(hero.querySelectorAll('[role="tablist"]')).toHaveLength(0);
       expect(hero.querySelectorAll("[data-tabs]")).toHaveLength(0);
@@ -284,7 +316,7 @@ describe("landing/build.mjs and page content", () => {
       ]);
       const heroInstall = hero.querySelector(".hero-install");
       expect(heroInstall.querySelector("#hero-install-command").textContent).toBe(
-        "curl -fsSL https://raw.githubusercontent.com/DennisLoska/losql/v0.2.0/install.sh | sh",
+        "curl -fsSL https://raw.githubusercontent.com/DennisLoska/losql/v0.3.0/install.sh | sh",
       );
       expect(
         heroInstall.querySelector('[data-copy="hero-install-command"]').getAttribute("aria-label"),
@@ -320,7 +352,7 @@ describe("landing/build.mjs and page content", () => {
 
       const footer = document.getElementById("footer");
       expect(footer.querySelector(".footer-facts").textContent).toBe(
-        "Open Source · MIT · SQLite & Postgres · Single Binary · Omarchy First · v0.2.0",
+        "Open Source · MIT · SQLite & Postgres · Single Binary · Omarchy First · v0.3.0",
       );
       expect(footer.querySelector(".footer-copy").textContent).toBe(
         "Made for the terminal. © 2026 losql contributors.",
@@ -379,7 +411,7 @@ describe("landing/build.mjs and page content", () => {
       const copy = document.querySelector("[data-copy]");
       const command = document.getElementById(copy.dataset.copy!).textContent;
       expect(command).toBe(
-        "curl -fsSL https://raw.githubusercontent.com/DennisLoska/losql/v0.2.0/install.sh | sh",
+        "curl -fsSL https://raw.githubusercontent.com/DennisLoska/losql/v0.3.0/install.sh | sh",
       );
       copy.click();
       await Promise.resolve();
@@ -555,6 +587,7 @@ describe("landing/build.mjs and page content", () => {
         "fonts/PlusJakartaSans-latin.woff2",
         "fonts/JetBrainsMono-latin.woff2",
         "media/hero.webp",
+        "media/structure.webp",
         "media/omarchy.webp",
         "media/omarchy-transparent.webp",
         "media/workflow-tour.webp",
@@ -603,13 +636,14 @@ describe("landing/build.mjs and page content", () => {
       expect(indexHtml).toContain("omarchy-transparent.webp");
       expect(indexHtml).toContain(":set transparent");
 
-      // All nine tour stops and three WebP recording assets remain represented.
+      // All ten tour stops and three WebP recording assets remain represented.
       for (const media of [
         "hero.webp",
         "editor.webp",
         "agent.webp",
         "json.webp",
         "record.webp",
+        "structure.webp",
         "zoom.webp",
         "providers.webp",
         "themes.webp",
@@ -622,11 +656,11 @@ describe("landing/build.mjs and page content", () => {
       }
       expect(indexHtml).not.toContain(".gif");
       expect(indexHtml).toContain(
-        "curl -fsSL https://raw.githubusercontent.com/DennisLoska/losql/v0.2.0/install.sh | sh",
+        "curl -fsSL https://raw.githubusercontent.com/DennisLoska/losql/v0.3.0/install.sh | sh",
       );
       expect(indexHtml).not.toContain("git clone");
       expect(indexHtml).toContain(
-        "Open Source · MIT · SQLite &amp; Postgres · Single Binary · Omarchy First · v0.2.0",
+        "Open Source · MIT · SQLite &amp; Postgres · Single Binary · Omarchy First · v0.3.0",
       );
 
       // Strict negative guards: no fake content, no fork/steal encouragement, no star counters, no external Google Fonts
@@ -727,6 +761,7 @@ describe("landing/build.mjs and page content", () => {
       expect(appNode).toBeDefined();
       expect(appNode?.["name"]).toBe("losql");
       expect(appNode?.["applicationCategory"]).toBe("DeveloperApplication");
+      expect(appNode?.["softwareVersion"]).toBe("0.3.0");
       expect(appNode?.["codeRepository"]).toBe("https://github.com/DennisLoska/losql");
       expect(siteNode).toBeDefined();
       expect(siteNode?.["url"]).toBe("https://losql.dev/");
@@ -735,11 +770,13 @@ describe("landing/build.mjs and page content", () => {
       const sitemap = readFileSync(join(outDir, "sitemap.xml"), "utf8");
       expect(sitemap).toContain("http://www.google.com/schemas/sitemap-image/1.1");
       expect(sitemap).toContain("<image:loc>https://losql.dev/media/hero.webp</image:loc>");
+      expect(sitemap).toContain("<image:loc>https://losql.dev/media/structure.webp</image:loc>");
 
       const llmsTxt = readFileSync(join(outDir, "llms.txt"), "utf8");
       expect(llmsTxt).toContain("# losql");
       expect(llmsTxt).toContain("https://losql.dev/");
       expect(llmsTxt).toContain("https://github.com/DennisLoska/losql");
+      expect(llmsTxt).toContain("v0.3.0/install.sh");
 
       const manifest = JSON.parse(readFileSync(join(outDir, "site.webmanifest"), "utf8")) as Record<string, unknown>;
       expect(manifest["name"]).toBe("losql");

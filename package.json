@@ -1,6 +1,6 @@
 {
   "name": "losql",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "A vim-first SQL client for the terminal, with an agent on board. SQLite and Postgres, one binary, no API keys.",
   "homepage": "https://losql.dev",
   "license": "MIT",

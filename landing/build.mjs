@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const OUT = path.resolve(process.env.LANDING_OUT || path.join(ROOT, "dist"));
-const staticMedia = ["hero", "editor", "agent", "json", "record", "zoom", "providers", "themes", "menu", "onboarding", "omarchy", "omarchy-transparent"];
+const staticMedia = ["hero", "editor", "agent", "json", "record", "structure", "zoom", "providers", "themes", "menu", "onboarding", "omarchy", "omarchy-transparent"];
 const recordings = ["workflow-tour", "recording-vim", "recording-agent", "recording-omarchy"];
 const required = [
   "src/index.html", "src/404.html", "src/site.css", "src/site.js", "public/favicon.svg",
@@ -63,6 +63,7 @@ writeFileSync(
     "    <image:image><image:loc>https://losql.dev/media/hero.webp</image:loc><image:title>losql terminal SQL workspace</image:title></image:image>",
     "    <image:image><image:loc>https://losql.dev/media/editor.webp</image:loc><image:title>Modal Vim SQL editing and schema completion in losql</image:title></image:image>",
     "    <image:image><image:loc>https://losql.dev/media/agent.webp</image:loc><image:title>Read-only AI Agent steps and SQL proposals in losql</image:title></image:image>",
+    "    <image:image><image:loc>https://losql.dev/media/structure.webp</image:loc><image:title>Relation Structure with columns, indexes and constraints in losql</image:title></image:image>",
     "    <image:image><image:loc>https://losql.dev/media/omarchy.webp</image:loc><image:title>losql in the live Omarchy system palette</image:title></image:image>",
     "    <image:image><image:loc>https://losql.dev/media/omarchy-transparent.webp</image:loc><image:title>losql with transparent pane backgrounds</image:title></image:image>",
     "  </url>",
@@ -85,10 +86,11 @@ writeFileSync(
     "- Modal Vim SQL editing (`is`/`as` statement text objects, operators, registers, dot repeat, `/` regex search, `ctrl+n` live schema completion).",
     "- Agent on board with zero API keys: drives local coding CLIs (`claude`, `codex`, `opencode`, `antigravity`) in an isolated read-only directory with database credentials stripped.",
     "- In-process SQLite (`bun:sqlite`) and PostgreSQL driver in a single compiled binary (`losql demo`, `losql ./app.db`, `losql postgres://...`).",
-    "- Three instant Result views (`Table`, `JSON`, `Record`) plus full-screen zoom (`space z`).",
+    "- Three instant Result views (`Table`, `JSON`, `Record`) on a box-drawn grid, plus full-screen zoom (`space z`).",
+    "- Relation Structure inspection (`S` in Schema, `space v s`, `:inspect [relation]`): Columns, Indexes, Constraints and Definition for SQLite and PostgreSQL.",
     "- First-class Omarchy live `colors.toml` theme synchronization, `:set transparent` / `ctrl+t` transparent pane mode, and 7 built-in OpenCode-format themes.",
     "- Scriptable headless CLI: `losql exec`, `losql ask`, and `losql providers --test`.",
-    "- Install prebuilt binary (Linux & macOS): `curl -fsSL https://raw.githubusercontent.com/DennisLoska/losql/v0.2.0/install.sh | sh`.",
+    "- Install prebuilt binary (Linux & macOS): `curl -fsSL https://raw.githubusercontent.com/DennisLoska/losql/v0.3.0/install.sh | sh`.",
     "",
   ].join("\n"),
 );
