@@ -1,4 +1,4 @@
-import type { Relation, SchemaSnapshot } from "../db/types";
+import type { Relation, RelationDetails, RelationRef, SchemaSnapshot } from "../db/types";
 import { MAX_DESCRIBE_CHARS, MAX_DIGEST_CHARS } from "./prompt";
 
 const DEFAULT_MAX_RELATIONS = 60;
@@ -112,10 +112,17 @@ export function schemaDigest(
 }
 
 export const MAX_DESCRIBE_RELATIONS = 50;
+const MAX_DESCRIBE_EXPRESSION_CHARS = 400;
 
-export function describeRelations(schema: SchemaSnapshot, names: string[]): string {
-  const qualifiedMap = new Map<string, { namespace: string; relation: Relation }>();
-  const unqualifiedMap = new Map<string, { namespace: string; relation: Relation }>();
+interface ResolvedRelation {
+  namespace: string;
+  relation: Relation;
+}
+
+/** Case-insensitive lookup of requested names: `ns.rel` against qualified names, `rel` against the first match. */
+function relationResolver(schema: SchemaSnapshot): (requested: string) => ResolvedRelation | undefined {
+  const qualifiedMap = new Map<string, ResolvedRelation>();
+  const unqualifiedMap = new Map<string, ResolvedRelation>();
 
   for (const ns of schema.namespaces) {
     const nsLower = ns.name.toLowerCase();
@@ -132,51 +139,152 @@ export function describeRelations(schema: SchemaSnapshot, names: string[]): stri
     }
   }
 
-  const boundedNames = names.slice(0, MAX_DESCRIBE_RELATIONS);
-  const extraCount = Math.max(0, names.length - boundedNames.length);
-  const extraLine = extraCount > 0 ? `… and ${extraCount} more not shown` : undefined;
-  const blocks: string[][] = [];
-
-  for (const requested of boundedNames) {
+  return (requested) => {
     const key = requested.toLowerCase();
-    const matched = requested.includes(".")
-      ? qualifiedMap.get(key)
-      : unqualifiedMap.get(key);
+    return requested.includes(".") ? qualifiedMap.get(key) : unqualifiedMap.get(key);
+  };
+}
 
-    if (!matched) {
-      blocks.push([`${sanitizeIdentifier(requested)}: no such relation`]);
-      continue;
+/**
+ * SQL text from the database (defaults, generated expressions, index predicates, constraint
+ * definitions) is untrusted data: control characters and line breaks become spaces, angle brackets
+ * become full-width look-alikes so no prompt tag can be opened or closed, and the text is bounded.
+ */
+function sanitizeSqlText(text: string): string {
+  const cleaned = text
+    .replace(/[\u0000-\u001F\u007F\u2028\u2029]/g, " ")
+    .replace(/</g, "\uFF1C")
+    .replace(/>/g, "\uFF1E");
+  if (cleaned.length > MAX_DESCRIBE_EXPRESSION_CHARS) {
+    let end = MAX_DESCRIBE_EXPRESSION_CHARS;
+    const prev = cleaned.charCodeAt(end - 1);
+    if (prev >= 0xd800 && prev <= 0xdbff) {
+      end--;
     }
+    return `${cleaned.slice(0, end)}…`;
+  }
+  return cleaned;
+}
 
-    const relLines: string[] = [];
-    const displayName = displayRelationName(matched.namespace, matched.relation.name);
-    relLines.push(`${displayName} (${matched.relation.kind})`);
-    for (const col of matched.relation.columns) {
-      let colLine = `  ${sanitizeIdentifier(col.name)} ${sanitizeIdentifier(col.type)}`;
-      if (!col.nullable) {
-        colLine += " not null";
-      }
-      if (col.primaryKey) {
-        colLine += " primary key";
-      }
-      if (col.references) {
-        colLine += ` references ${sanitizeIdentifier(col.references.relation)}.${sanitizeIdentifier(col.references.column)}`;
-      }
-      relLines.push(colLine);
+function unknownRelationBlock(requested: string): string[] {
+  return [`${sanitizeIdentifier(requested)}: no such relation`];
+}
+
+function snapshotBlock(matched: ResolvedRelation): string[] {
+  const relLines: string[] = [];
+  const displayName = displayRelationName(matched.namespace, matched.relation.name);
+  relLines.push(`${displayName} (${matched.relation.kind})`);
+  for (const col of matched.relation.columns) {
+    let colLine = `  ${sanitizeIdentifier(col.name)} ${sanitizeIdentifier(col.type)}`;
+    if (!col.nullable) {
+      colLine += " not null";
     }
-    blocks.push(relLines);
+    if (col.primaryKey) {
+      colLine += " primary key";
+    }
+    if (col.references) {
+      colLine += ` references ${sanitizeIdentifier(col.references.relation)}.${sanitizeIdentifier(col.references.column)}`;
+    }
+    relLines.push(colLine);
+  }
+  return relLines;
+}
+
+function qualifiedTarget(namespace: string | undefined, relation: string): string {
+  const rel = sanitizeIdentifier(relation);
+  return namespace !== undefined ? `${sanitizeIdentifier(namespace)}.${rel}` : rel;
+}
+
+function detailsBlock(matched: ResolvedRelation, details: RelationDetails): string[] {
+  const lines: string[] = [];
+  const displayName = displayRelationName(matched.namespace, matched.relation.name);
+  lines.push(`${displayName} (${details.kind})`);
+
+  for (const col of details.columns) {
+    let colLine = `  ${sanitizeIdentifier(col.name)} ${sanitizeIdentifier(col.type)}`;
+    if (!col.nullable) {
+      colLine += " not null";
+    }
+    if (col.defaultValue !== undefined) {
+      colLine += ` default ${sanitizeSqlText(col.defaultValue)}`;
+    }
+    if (col.generated !== undefined) {
+      colLine += ` generated ${sanitizeSqlText(col.generated)}`;
+    }
+    if (col.primaryKeyPosition !== undefined) {
+      colLine += " primary key";
+    }
+    for (const ref of col.references) {
+      colLine += ` references ${qualifiedTarget(ref.namespace, ref.relation)}.${sanitizeIdentifier(ref.column)}`;
+    }
+    lines.push(colLine);
   }
 
+  if (details.indexes !== undefined) {
+    lines.push("indexes:");
+    if (details.indexes.length === 0) {
+      lines.push("  (none)");
+    }
+    for (const index of details.indexes) {
+      let line = `  ${sanitizeIdentifier(index.name)}`;
+      if (index.primary) {
+        line += " primary";
+      } else if (index.unique) {
+        line += " unique";
+      }
+      line += ` (${index.columns.map(sanitizeSqlText).join(", ")})`;
+      if (index.includedColumns !== undefined && index.includedColumns.length > 0) {
+        line += ` include (${index.includedColumns.map(sanitizeIdentifier).join(", ")})`;
+      }
+      if (index.method !== undefined) {
+        line += ` ${sanitizeIdentifier(index.method)}`;
+      }
+      if (index.predicate !== undefined) {
+        line += ` where ${sanitizeSqlText(index.predicate)}`;
+      }
+      lines.push(line);
+    }
+  }
+
+  if (details.constraints !== undefined) {
+    lines.push("constraints:");
+    if (details.constraints.length === 0) {
+      lines.push("  (none)");
+    }
+    for (const constraint of details.constraints) {
+      let line = "  ";
+      if (constraint.name !== undefined) {
+        line += `${sanitizeIdentifier(constraint.name)} `;
+      }
+      line += constraint.kind;
+      if (constraint.columns.length > 0) {
+        line += ` (${constraint.columns.map(sanitizeIdentifier).join(", ")})`;
+      }
+      if (constraint.definition !== undefined) {
+        line += `: ${sanitizeSqlText(constraint.definition)}`;
+      } else if (constraint.references !== undefined) {
+        const target = qualifiedTarget(constraint.references.namespace, constraint.references.relation);
+        line += ` references ${target} (${constraint.references.columns.map(sanitizeIdentifier).join(", ")})`;
+      }
+      lines.push(line);
+    }
+  }
+
+  return lines;
+}
+
+/** Joins describe blocks and keeps the text within MAX_DESCRIBE_CHARS, cutting at line boundaries. */
+function boundDescribeText(blocks: string[][], totalRelations: number): string {
+  const extraCount = Math.max(0, totalRelations - MAX_DESCRIBE_RELATIONS);
   const allLines = blocks.flat();
-  if (extraLine !== undefined) {
-    allLines.push(extraLine);
+  if (extraCount > 0) {
+    allLines.push(`… and ${extraCount} more not shown`);
   }
   const fullText = allLines.join("\n");
   if (fullText.length <= MAX_DESCRIBE_CHARS) {
     return fullText;
   }
 
-  const totalRelations = names.length;
   const keptLines: string[] = [];
   let completedRelations = 0;
 
@@ -214,5 +322,46 @@ export function describeRelations(schema: SchemaSnapshot, names: string[]): stri
   return `${keptLines.join("\n")}\n… (${omitted} more relations omitted)`;
 }
 
+export function describeRelations(schema: SchemaSnapshot, names: string[]): string {
+  const resolve = relationResolver(schema);
+  const blocks = names.slice(0, MAX_DESCRIBE_RELATIONS).map((requested) => {
+    const matched = resolve(requested);
+    return matched ? snapshotBlock(matched) : unknownRelationBlock(requested);
+  });
+  return boundDescribeText(blocks, names.length);
+}
 
+/**
+ * Like describeRelations, but asks `load` for the Driver's rich Relation details (defaults,
+ * generated columns, indexes, constraints). Each resolved Relation is loaded at most once; a null
+ * from `load` falls back to the Schema snapshot columns. An aborted signal stops before the next load.
+ */
+export async function describeRelationsWithDetails(
+  schema: SchemaSnapshot,
+  names: string[],
+  load: (ref: RelationRef, signal?: AbortSignal) => Promise<RelationDetails | null>,
+  signal?: AbortSignal,
+): Promise<string> {
+  const resolve = relationResolver(schema);
+  const loaded = new Map<string, RelationDetails | null>();
+  const blocks: string[][] = [];
 
+  for (const requested of names.slice(0, MAX_DESCRIBE_RELATIONS)) {
+    const matched = resolve(requested);
+    if (!matched) {
+      blocks.push(unknownRelationBlock(requested));
+      continue;
+    }
+
+    const key = `${matched.namespace}\u0000${matched.relation.name}`;
+    let details = loaded.get(key);
+    if (details === undefined) {
+      signal?.throwIfAborted();
+      details = await load({ namespace: matched.namespace, name: matched.relation.name }, signal);
+      loaded.set(key, details);
+    }
+    blocks.push(details === null ? snapshotBlock(matched) : detailsBlock(matched, details));
+  }
+
+  return boundDescribeText(blocks, names.length);
+}
