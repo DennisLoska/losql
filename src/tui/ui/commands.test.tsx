@@ -283,3 +283,108 @@ describe("the palette and help", () => {
     expect(app.frame()).toContain("ctrl+w");
   });
 });
+
+const PAGE_DOWN = "\u001b[6~";
+const PAGE_UP = "\u001b[5~";
+const pageLabel = () => app.frame().match(/page (\d+)\/(\d+) · PgUp\/PgDn/);
+
+/** Press a key sequence through the renderer's stdin, the way a terminal sends it. */
+async function pressRaw(sequence: string) {
+  app.setup.mockInput.pressKeys([sequence]);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  await app.settle();
+}
+
+describe("the key menu pages when it overflows", () => {
+  test("a small terminal shows a page footer instead of hiding the rest", async () => {
+    app = await mount({ width: 40, height: 12 });
+    await app.press("<Space>");
+    const page = pageLabel();
+    expect(page).not.toBeNull();
+    expect(page![1]).toBe("1");
+    expect(Number(page![2])).toBeGreaterThanOrEqual(2);
+  });
+
+  test("] and [ page, and PageUp and PageDown do too", async () => {
+    app = await mount({ width: 40, height: 12 });
+    await app.press("<Space>");
+    await app.press("]");
+    expect(pageLabel()![1]).toBe("2");
+    await app.press("[");
+    expect(pageLabel()![1]).toBe("1");
+    await pressRaw(PAGE_DOWN);
+    expect(pageLabel()![1]).toBe("2");
+    await pressRaw(PAGE_UP);
+    expect(pageLabel()![1]).toBe("1");
+  });
+
+  test("the page clamps when the terminal grows so everything fits", async () => {
+    app = await mount({ width: 40, height: 12 });
+    await app.press("<Space>]");
+    expect(pageLabel()![1]).toBe("2");
+    await app.resize(120, 40);
+    expect(pageLabel()).toBeNull();
+    expect(app.frame()).toContain("Help");
+    expect(app.frame()).toContain("Zoom results");
+  });
+
+  test("a submenu entry and going back reset the page", async () => {
+    app = await mount({ width: 40, height: 12 });
+    await app.press("<Space>]");
+    expect(pageLabel()![1]).toBe("2");
+    await app.press("v");
+    expect(app.frame()).toContain("Table view");
+    expect(pageLabel()).toBeNull();
+    await app.press("<BS>");
+    const page = pageLabel();
+    expect(page).not.toBeNull();
+    expect(page![1]).toBe("1");
+  });
+
+  test("a direct key for an entry on another page still runs it", async () => {
+    app = await mount({ width: 40, height: 12 });
+    await app.press("<Space>");
+    expect(pageLabel()![1]).toBe("1");
+    await app.press("z");
+    expect(app.api.focus.zoomed()).toBe(true);
+    expect(pageLabel()).toBeNull();
+  });
+
+  test("no footer is drawn when everything fits", async () => {
+    app = await mount();
+    await app.press("<Space>");
+    expect(pageLabel()).toBeNull();
+  });
+});
+
+describe("help follows the configured Leader and documents Structure", () => {
+  /** Scrolls the Help dialog from the top until `needle` shows. */
+  async function helpShows(needle: string | RegExp) {
+    const shows = (frame: string) =>
+      typeof needle === "string" ? frame.includes(needle) : needle.test(frame);
+    await app.press("gg");
+    for (let attempt = 0; attempt < 16; attempt++) {
+      if (shows(app.frame())) return;
+      await app.press("<C-d>");
+    }
+    throw new Error(`Help never showed ${String(needle)}:\n${app.frame()}`);
+  }
+
+  test("the Global Leader label is the configured Leader", async () => {
+    app = await mount({ config: { leader: "," } });
+    await app.press("<F1>");
+    const line = app.frame().split("\n").find((l) => l.includes("Leader: open the key menu"));
+    expect(line).toBeDefined();
+    // Rows behind the dialog start with the Schema Pane's border, so the key column is read after it.
+    expect(line!).toMatch(/(^|[│\s]),\s+Leader: open the key menu/);
+  });
+
+  test("Schema S, the Leader shortcut, :inspect and the section keys are documented", async () => {
+    app = await mount({ config: { leader: "," } });
+    await app.press("<F1>");
+    await helpShows(", v s");
+    await helpShows(":inspect");
+    await helpShows(/(^|[│\s])S\s+.*structure/im);
+    await helpShows(/^.*\bTab\b.*(section|Columns)/im);
+  });
+});

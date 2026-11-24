@@ -14,6 +14,12 @@ import {
   refuseNulCharacter,
   type Relation,
   type RelationColumn,
+  type RelationColumnDetail,
+  type RelationConstraint,
+  type RelationConstraintKind,
+  type RelationDetails,
+  type RelationIndex,
+  type RelationRef,
   type Result,
   type RunOptions,
   type SchemaSnapshot,
@@ -400,6 +406,46 @@ function expandPostgresUrl(
   return `${prefix}${expandedUserinfo}${expandEnv(suffix, env)}`;
 }
 
+/** Ordinary, partitioned and foreign tables are tables; views and materialized views are views. */
+function relationKind(relkind: string): "table" | "view" {
+  return relkind === "v" || relkind === "m" ? "view" : "table";
+}
+
+const CONSTRAINT_KINDS: Record<string, RelationConstraintKind> = {
+  p: "PRIMARY KEY",
+  u: "UNIQUE",
+  f: "FOREIGN KEY",
+  c: "CHECK",
+};
+
+const FK_ACTIONS: Record<string, string> = {
+  a: "NO ACTION",
+  r: "RESTRICT",
+  c: "CASCADE",
+  n: "SET NULL",
+  d: "SET DEFAULT",
+};
+
+/**
+ * Like Promise.all, but waits for every statement to settle before rejecting, so a slot is never
+ * released while a sibling statement is still running on the side client.
+ */
+async function settleAll<T extends readonly unknown[]>(
+  promises: readonly [...{ [K in keyof T]: Promise<T[K]> }],
+): Promise<T> {
+  const results = await Promise.allSettled(promises);
+  for (const result of results) {
+    if (result.status === "rejected") throw result.reason;
+  }
+  return results.map((r) => (r as PromiseFulfilledResult<unknown>).value) as unknown as T;
+}
+
+/** A text[] column as the client returns it (an array); anything else reads as no columns. */
+function asTextArray(value: unknown): string[] {
+  if (Array.isArray(value)) return value.map((v) => String(v));
+  return [];
+}
+
 export async function openPostgres(
   connection: Connection,
   options?: { env?: Record<string, string | undefined> },
@@ -441,16 +487,156 @@ export async function openPostgres(
 
   const typeNames = new Map<number, string>(SEEDED_TYPE_NAMES);
   const activeQueries = new Set<() => Promise<unknown>>();
-  let readOnlyChain: Promise<void> = Promise.resolve();
+  // The tail of the exclusive queue for the side client: each holder runs alone on it, so a
+  // read-only Run's transaction, its ROLLBACK and RESET ALL never interleave with other side work.
+  let sideTail: Promise<void> = Promise.resolve();
   let closingPromise: Promise<void> | null = null;
 
-  async function resolveTypeNames(oids: number[]): Promise<void> {
+  const sessionClosedError = () => new QueryError("the Session is closed");
+  const userCancelError = () =>
+    new QueryError("canceling statement due to user request", { code: "57014" });
+  const statementTimeoutError = () =>
+    new QueryError("canceling statement due to statement timeout", { code: "57014" });
+
+  /** Throws the canonical QueryError when the Session is closed or the caller gave up. */
+  function checkSideCaller(signal: AbortSignal | undefined): void {
+    if (closed) throw sessionClosedError();
+    if (signal?.aborted) throw userCancelError();
+  }
+
+  /**
+   * Resolves once `prevTurn` settles. A waiter that is aborted, times out or sees the Session close
+   * is rejected at once; the caller still keeps its slot unreleased until `prevTurn` settles.
+   */
+  function waitForSideTurn(
+    prevTurn: Promise<void>,
+    signal: AbortSignal | undefined,
+    timeoutMs: number | undefined,
+  ): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      let settled = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+
+      const finish = (err?: QueryError) => {
+        if (settled) return;
+        settled = true;
+        activeQueries.delete(cancelWait);
+        if (timer !== undefined) clearTimeout(timer);
+        signal?.removeEventListener("abort", onAbort);
+        if (err) reject(err);
+        else resolve();
+      };
+      const cancelWait = async () => finish(sessionClosedError());
+      const onAbort = () => finish(userCancelError());
+
+      activeQueries.add(cancelWait);
+      signal?.addEventListener("abort", onAbort, { once: true });
+      if (timeoutMs !== undefined && Number.isFinite(timeoutMs) && timeoutMs > 0) {
+        timer = setTimeout(() => finish(statementTimeoutError()), timeoutMs);
+      }
+
+      void prevTurn.then(() => {
+        if (closed) finish(sessionClosedError());
+        else if (signal?.aborted) finish(userCancelError());
+        else finish();
+      });
+    });
+  }
+
+  /**
+   * Runs `operation` alone on the side client. Callers are queued in the order they call; an
+   * acquired slot is released in `finally`, and an abandoned waiter's slot is released only once its
+   * predecessor settles, so no two operations ever overlap. With `interruptOnClose`, `close()`
+   * rejects the caller at once while the slot stays held until the operation itself settles.
+   */
+  async function withSide<T>(
+    operation: () => Promise<T>,
+    options?: { signal?: AbortSignal; timeoutMs?: number; interruptOnClose?: boolean },
+  ): Promise<T> {
+    const signal = options?.signal;
+    checkSideCaller(signal);
+
+    const prevTurn = sideTail;
+    let resolveTurn!: () => void;
+    sideTail = new Promise<void>((resolve) => {
+      resolveTurn = resolve;
+    });
+    let released = false;
+    const releaseTurn = () => {
+      if (released) return;
+      released = true;
+      resolveTurn();
+    };
+
+    try {
+      await waitForSideTurn(prevTurn, signal, options?.timeoutMs);
+    } catch (err) {
+      void prevTurn.then(releaseTurn);
+      throw err;
+    }
+
+    const held = (async () => {
+      try {
+        checkSideCaller(signal);
+        return await operation();
+      } finally {
+        releaseTurn();
+      }
+    })();
+    if (!options?.interruptOnClose) return held;
+
+    let interrupt!: () => void;
+    const closeInterrupt = new Promise<never>((_, reject) => {
+      interrupt = () => reject(sessionClosedError());
+    });
+    const onClose = async () => interrupt();
+    activeQueries.add(onClose);
+    // The race may settle first; the operation's own outcome is then no longer awaited.
+    held.catch(() => {});
+    try {
+      return await Promise.race([held, closeInterrupt]);
+    } finally {
+      activeQueries.delete(onClose);
+    }
+  }
+
+  /**
+   * One statement on the side client, only ever called inside a `withSide` slot. Its cancellation
+   * is registered for `close()` and the caller's signal, and removed once it settles.
+   */
+  async function sideQuery<T extends object[]>(
+    text: string,
+    params: postgres.ParameterOrJSON<never>[],
+    signal: AbortSignal | undefined,
+  ): Promise<T> {
+    checkSideCaller(signal);
+    const query = side.unsafe<T>(text, params);
+    const cancel = () => query.cancel().catch(() => {});
+    const onAbort = () => {
+      void cancel();
+    };
+    activeQueries.add(cancel);
+    signal?.addEventListener("abort", onAbort, { once: true });
+    try {
+      return await query;
+    } finally {
+      activeQueries.delete(cancel);
+      signal?.removeEventListener("abort", onAbort);
+    }
+  }
+
+  /**
+   * Looks up the uncached `oids` in pg_type and caches their names; an OID pg_type does not know is
+   * cached as its number. Runs inside a `withSide` slot.
+   */
+  async function lookupTypeNames(oids: number[], signal: AbortSignal | undefined): Promise<void> {
     const missing = [...new Set(oids.filter((oid) => !typeNames.has(oid)))];
     if (missing.length === 0) return;
 
-    const rows = await side.unsafe<{ oid: string | number; typname: string }[]>(
+    const rows = await sideQuery<{ oid: string | number; typname: string }[]>(
       "select oid::bigint as oid, typname from pg_type where oid = any($1)",
       [missing],
+      signal,
     );
     for (const row of rows) {
       typeNames.set(Number(row.oid), row.typname);
@@ -460,6 +646,258 @@ export async function openPostgres(
         typeNames.set(oid, String(oid));
       }
     }
+  }
+
+  /**
+   * Fills the type name cache for a read-only Run's `oids`. Called only outside a `withSide` slot
+   * (the queue is not reentrant), and takes its own short slot only on a cache miss. Both the wait
+   * for that slot and the lookup itself end at `deadline` (the Run's timeout budget): the caller is
+   * rejected at once with the statement-timeout QueryError and an in-flight lookup is canceled,
+   * while the slot stays held until that lookup actually settles.
+   */
+  async function resolveTypeNames(
+    oids: number[],
+    signal: AbortSignal | undefined,
+    deadline: number | undefined,
+  ): Promise<void> {
+    if (oids.every((oid) => typeNames.has(oid))) return;
+
+    if (deadline === undefined) {
+      await withSide(() => lookupTypeNames(oids, signal), { signal });
+      return;
+    }
+
+    const timeoutMs = deadline - performance.now();
+    if (timeoutMs <= 0) throw statementTimeoutError();
+
+    const expiry = new AbortController();
+    const lookupSignal = signal ? AbortSignal.any([signal, expiry.signal]) : expiry.signal;
+    const lookup = withSide(() => lookupTypeNames(oids, lookupSignal), { signal, timeoutMs });
+    // The deadline may win the race; the lookup's own outcome is then no longer awaited.
+    lookup.catch(() => {});
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const expired = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        expiry.abort();
+        reject(statementTimeoutError());
+      }, timeoutMs);
+    });
+    try {
+      await Promise.race([lookup, expired]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /**
+   * Names a user-connection Run's `oids`, looking up uncached ones on the user connection itself,
+   * right after its statement succeeded there: never behind a busy side client (whose work may be
+   * waiting for a lock the user's own open transaction holds), and it also sees types the user's
+   * open transaction created. Names are cached only when that transaction has written nothing, so
+   * nothing it may roll back is kept; OIDs pg_type does not show are not cached either. A failed
+   * lookup is not a failed Run: its uncached types show as their OIDs.
+   *
+   * Inside the user's open transaction a failed statement would abort that transaction, so the
+   * lookup runs under a savepoint that is rolled back when it fails. The client does not expose the
+   * connection's transaction status, so the SAVEPOINT is also the probe: outside a transaction it is
+   * refused with 25P01 and the lookup runs plainly, where a failure has no transaction to abort.
+   */
+  async function resolveTypeNamesOnUser(oids: number[]): Promise<Map<number, string>> {
+    const names = new Map<number, string>();
+    const missing = [...new Set(oids.filter((oid) => !typeNames.has(oid)))];
+    if (missing.length === 0) return names;
+
+    // Unnamed statements: a user's DEALLOCATE ALL or DISCARD ALL cannot break them.
+    const unnamed = { prepare: false } as const;
+    const savepoint = "losql_type_names";
+    let inTransaction: boolean;
+    try {
+      await user.unsafe(`savepoint ${savepoint}`, [], unnamed);
+      inTransaction = true;
+    } catch (err) {
+      if ((err as { code?: unknown }).code !== "25P01") {
+        // Not the no-transaction refusal: leave the connection alone; uncached types show as OIDs.
+        return names;
+      }
+      inTransaction = false;
+    }
+
+    try {
+      const rows = await user.unsafe<{ oid: string; typname: string; cacheable: boolean }[]>(
+        "select t.oid::pg_catalog.int8 as oid, t.typname::pg_catalog.text as typname, pg_catalog.txid_current_if_assigned() is null as cacheable from pg_catalog.pg_type t where t.oid operator(pg_catalog.=) any($1::pg_catalog.oid[])",
+        [missing],
+        unnamed,
+      );
+      if (inTransaction) await user.unsafe(`release savepoint ${savepoint}`, [], unnamed);
+      for (const row of rows) {
+        const oid = Number(row.oid);
+        names.set(oid, row.typname);
+        if (row.cacheable) typeNames.set(oid, row.typname);
+      }
+    } catch {
+      // The Run itself succeeded; its uncached types show as their OIDs. Inside a transaction the
+      // savepoint undoes the failed lookup, so the user's transaction stays usable.
+      if (inTransaction) {
+        await user
+          .unsafe(`rollback to savepoint ${savepoint}; release savepoint ${savepoint}`)
+          .catch(() => {});
+      }
+    }
+    return names;
+  }
+
+  /** The Structure of one Relation; runs inside a `withSide` slot. Every value is a bound parameter. */
+  async function describeOnSide(
+    ref: RelationRef,
+    signal: AbortSignal | undefined,
+  ): Promise<RelationDetails | null> {
+    const relRows = await sideQuery<{ oid: string; relkind: string; definition: string | null }[]>(
+      "select c.oid::text as oid, c.relkind, case when c.relkind in ('v','m') then pg_get_viewdef(c.oid, true) end as definition from pg_class c join pg_namespace n on n.oid = c.relnamespace where n.nspname::text = $1::text and c.relname::text = $2::text and c.relkind in ('r','p','v','m','f')",
+      [ref.namespace, ref.name],
+      signal,
+    );
+    const rel = relRows[0];
+    if (!rel) return null;
+
+    const [columnRows, indexRows, constraintRows] = await settleAll([
+      sideQuery<
+        {
+          name: string;
+          type: string;
+          notnull: boolean;
+          generated_kind: string;
+          identity: string;
+          expr: string | null;
+          pk_position: number | null;
+        }[]
+      >(
+        "select a.attname as name, format_type(a.atttypid, a.atttypmod) as type, a.attnotnull as notnull, a.attgenerated::text as generated_kind, a.attidentity::text as identity, pg_get_expr(ad.adbin, ad.adrelid) as expr, (select k.ord::int from pg_index i cross join lateral unnest(i.indkey::int2[]) with ordinality as k(attnum, ord) where i.indrelid = a.attrelid and i.indisprimary and k.ord <= i.indnkeyatts and k.attnum = a.attnum limit 1) as pk_position from pg_attribute a left join pg_attrdef ad on ad.adrelid = a.attrelid and ad.adnum = a.attnum where a.attrelid = $1::oid and a.attnum > 0 and not a.attisdropped order by a.attnum",
+        [rel.oid],
+        signal,
+      ),
+      sideQuery<
+        {
+          name: string;
+          is_unique: boolean;
+          is_primary: boolean;
+          method: string | null;
+          predicate: string | null;
+          definition: string;
+          nkey: number;
+          columns: string[];
+        }[]
+      >(
+        "select ic.relname as name, i.indisunique as is_unique, i.indisprimary as is_primary, am.amname as method, pg_get_expr(i.indpred, i.indrelid) as predicate, pg_get_indexdef(i.indexrelid) as definition, i.indnkeyatts::int as nkey, array(select pg_get_indexdef(i.indexrelid, s.pos, true) from generate_series(1, i.indnatts::int) as s(pos) order by s.pos) as columns from pg_index i join pg_class ic on ic.oid = i.indexrelid left join pg_am am on am.oid = ic.relam where i.indrelid = $1::oid order by i.indisprimary desc, ic.relname",
+        [rel.oid],
+        signal,
+      ),
+      sideQuery<
+        {
+          name: string;
+          contype: string;
+          definition: string | null;
+          columns: string[];
+          ref_namespace: string | null;
+          ref_relation: string | null;
+          ref_columns: string[];
+          on_update: string;
+          on_delete: string;
+        }[]
+      >(
+        "select c.conname as name, c.contype::text as contype, pg_get_constraintdef(c.oid, true) as definition, array(select a.attname::text from unnest(c.conkey) with ordinality as k(attnum, ord) join pg_attribute a on a.attrelid = c.conrelid and a.attnum = k.attnum order by k.ord) as columns, fn.nspname as ref_namespace, fc.relname as ref_relation, array(select a.attname::text from unnest(c.confkey) with ordinality as k(attnum, ord) join pg_attribute a on a.attrelid = c.confrelid and a.attnum = k.attnum order by k.ord) as ref_columns, c.confupdtype::text as on_update, c.confdeltype::text as on_delete from pg_constraint c left join pg_class fc on fc.oid = c.confrelid left join pg_namespace fn on fn.oid = fc.relnamespace where c.conrelid = $1::oid and c.contype in ('p','u','f','c') order by case c.contype when 'p' then 0 when 'u' then 1 when 'f' then 2 else 3 end, c.conname",
+        [rel.oid],
+        signal,
+      ),
+    ]);
+
+    const columns: RelationColumnDetail[] = columnRows.map((row) => {
+      const column: RelationColumnDetail = {
+        name: row.name,
+        type: row.type,
+        nullable: !row.notnull,
+        references: [],
+      };
+      if (row.generated_kind !== "") {
+        column.generated = row.expr ?? (row.generated_kind === "v" ? "virtual" : "stored");
+      } else if (row.identity === "a") {
+        column.generated = "ALWAYS AS IDENTITY";
+      } else if (row.identity === "d") {
+        column.generated = "BY DEFAULT AS IDENTITY";
+      } else if (row.expr !== null) {
+        column.defaultValue = row.expr;
+      }
+      if (row.pk_position !== null) {
+        column.primaryKeyPosition = Number(row.pk_position);
+      }
+      return column;
+    });
+    const columnsByName = new Map(columns.map((c) => [c.name, c]));
+
+    const indexes: RelationIndex[] = indexRows.map((row) => {
+      const all = asTextArray(row.columns);
+      const keyCount = Number(row.nkey);
+      const index: RelationIndex = {
+        name: row.name,
+        unique: row.is_unique,
+        primary: row.is_primary,
+        columns: all.slice(0, keyCount),
+        definition: row.definition,
+      };
+      const included = all.slice(keyCount);
+      if (included.length > 0) index.includedColumns = included;
+      if (row.method) index.method = row.method;
+      if (row.predicate !== null) index.predicate = row.predicate;
+      return index;
+    });
+
+    const constraints: RelationConstraint[] = constraintRows.map((row) => {
+      const localColumns = asTextArray(row.columns);
+      const constraint: RelationConstraint = {
+        name: row.name,
+        kind: CONSTRAINT_KINDS[row.contype]!,
+        columns: localColumns,
+      };
+      if (row.definition !== null) constraint.definition = row.definition;
+      if (row.contype === "f" && row.ref_relation !== null) {
+        const targetColumns = asTextArray(row.ref_columns);
+        const onUpdate = FK_ACTIONS[row.on_update];
+        const onDelete = FK_ACTIONS[row.on_delete];
+        constraint.references = {
+          ...(row.ref_namespace !== null ? { namespace: row.ref_namespace } : {}),
+          relation: row.ref_relation,
+          columns: targetColumns,
+          ...(onUpdate ? { onUpdate } : {}),
+          ...(onDelete ? { onDelete } : {}),
+        };
+        // conkey and confkey pair by ordinal position.
+        localColumns.forEach((local, i) => {
+          const target = targetColumns[i];
+          const column = columnsByName.get(local);
+          if (!column || target === undefined) return;
+          column.references.push({
+            ...(row.ref_namespace !== null ? { namespace: row.ref_namespace } : {}),
+            relation: row.ref_relation!,
+            column: target,
+            constraintName: row.name,
+            ...(onUpdate ? { onUpdate } : {}),
+            ...(onDelete ? { onDelete } : {}),
+          });
+        });
+      }
+      return constraint;
+    });
+
+    const details: RelationDetails = {
+      namespace: ref.namespace,
+      name: ref.name,
+      kind: relationKind(rel.relkind),
+      columns,
+      indexes,
+      constraints,
+    };
+    if (rel.definition !== null) details.definition = rel.definition;
+    return details;
   }
 
   async function executeQuery(
@@ -568,74 +1006,6 @@ export async function openPostgres(
     }
   }
 
-  function acquireReadOnlyTurn(
-    prevTurn: Promise<void>,
-    signal: AbortSignal | undefined,
-    timeoutMs: number | undefined,
-  ): Promise<void> {
-    if (closed) {
-      return Promise.reject(new QueryError("the Session is closed"));
-    }
-    if (signal?.aborted) {
-      return Promise.reject(
-        new QueryError("canceling statement due to user request", { code: "57014" }),
-      );
-    }
-
-    return new Promise<void>((resolve, reject) => {
-      let settled = false;
-      let timer: ReturnType<typeof setTimeout> | undefined;
-
-      const cleanup = () => {
-        activeQueries.delete(cancelWait);
-        if (timer !== undefined) {
-          clearTimeout(timer);
-        }
-        if (signal) {
-          signal.removeEventListener("abort", onAbort);
-        }
-      };
-
-      const cancelWait = async () => {
-        if (settled) return;
-        settled = true;
-        cleanup();
-        reject(new QueryError("the Session is closed"));
-      };
-
-      const onAbort = () => {
-        if (settled) return;
-        settled = true;
-        cleanup();
-        reject(new QueryError("canceling statement due to user request", { code: "57014" }));
-      };
-
-      activeQueries.add(cancelWait);
-      if (signal) {
-        signal.addEventListener("abort", onAbort, { once: true });
-      }
-      if (timeoutMs !== undefined && Number.isFinite(timeoutMs) && timeoutMs > 0) {
-        timer = setTimeout(() => {
-          if (settled) return;
-          settled = true;
-          cleanup();
-          reject(new QueryError("canceling statement due to statement timeout", { code: "57014" }));
-        }, timeoutMs);
-      }
-
-      void prevTurn.then(() => {
-        if (settled) return;
-        settled = true;
-        cleanup();
-        if (closed) {
-          reject(new QueryError("the Session is closed"));
-          return;
-        }
-        resolve();
-      });
-    });
-  }
-
   return {
     connection,
 
@@ -666,60 +1036,42 @@ export async function openPostgres(
         // resetting session parameters and releasing advisory locks on the side connection.
         // It does not prevent functions with side effects outside the transaction (for example
         // pg_terminate_backend or pg_notify).
+        // The slot is held through ROLLBACK, RESET ALL and the advisory-lock release; the timeout
+        // budget counts from the Run request, so time spent waiting for the slot is part of it.
         const execResult = isReadOnly
-          ? await (() => {
-              const prevTurn = readOnlyChain;
-              let releaseTurn!: () => void;
-              readOnlyChain = new Promise<void>((r) => {
-                releaseTurn = r;
-              });
-
-              return (async () => {
-                let tookTurn = false;
+          ? await withSide(
+              async () => {
                 try {
-                  await acquireReadOnlyTurn(prevTurn, signal, timeoutMs);
-                  tookTurn = true;
-                  try {
-                    const hasTimeout =
-                      timeoutMs !== undefined && Number.isFinite(timeoutMs) && timeoutMs > 0;
-                    let remainingMs: number | undefined;
-                    if (hasTimeout) {
-                      const elapsed = performance.now() - start;
-                      const rem = timeoutMs - elapsed;
-                      if (rem <= 0) {
-                        throw new QueryError("canceling statement due to statement timeout", {
-                          code: "57014",
-                        });
-                      }
-                      remainingMs = Math.max(1, Math.floor(rem));
-                    }
-
-                    return await side.begin("read only", async (tx) => {
-                      if (remainingMs !== undefined) {
-                        await tx.unsafe(`set local statement_timeout = ${remainingMs}; select 1`);
-                      }
-                      try {
-                        return await executeQuery(tx, statement, max, signal, remainingMs, false);
-                      } finally {
-                        await tx.rollback().catch(() => {});
-                      }
-                    });
-                  } finally {
-                    if (!closed) {
-                      await side
-                        .unsafe("reset all; select pg_advisory_unlock_all()")
-                        .catch(() => {});
-                    }
+                  const hasTimeout =
+                    timeoutMs !== undefined && Number.isFinite(timeoutMs) && timeoutMs > 0;
+                  let remainingMs: number | undefined;
+                  if (hasTimeout) {
+                    const elapsed = performance.now() - start;
+                    const rem = timeoutMs - elapsed;
+                    if (rem <= 0) throw statementTimeoutError();
+                    remainingMs = Math.max(1, Math.floor(rem));
                   }
+
+                  return await side.begin("read only", async (tx) => {
+                    if (remainingMs !== undefined) {
+                      await tx.unsafe(`set local statement_timeout = ${remainingMs}; select 1`);
+                    }
+                    try {
+                      return await executeQuery(tx, statement, max, signal, remainingMs, false);
+                    } finally {
+                      await tx.rollback().catch(() => {});
+                    }
+                  });
                 } finally {
-                  if (tookTurn) {
-                    releaseTurn();
-                  } else {
-                    void prevTurn.then(releaseTurn);
+                  if (!closed) {
+                    await side
+                      .unsafe("reset all; select pg_advisory_unlock_all()")
+                      .catch(() => {});
                   }
                 }
-              })();
-            })()
+              },
+              { signal, timeoutMs },
+            )
           : await executeQuery(user, statement, max, signal, timeoutMs, true);
 
         const { rawColumns, rows, truncated, command, count } = execResult;
@@ -736,10 +1088,21 @@ export async function openPostgres(
           };
         }
 
-        await resolveTypeNames(rawColumns.map((c) => c.type));
+        // Outside the read-only slot (the queue is not reentrant). A read-only Run's lookup stays
+        // within its timeout budget. A Run on the user connection may already have written, so a
+        // late abort must not report it as canceled; its lookup runs on the user connection.
+        const oids = rawColumns.map((c) => c.type);
+        let runTypeNames: Map<number, string> | undefined;
+        if (isReadOnly) {
+          const hasTimeout =
+            timeoutMs !== undefined && Number.isFinite(timeoutMs) && timeoutMs > 0;
+          await resolveTypeNames(oids, signal, hasTimeout ? start + timeoutMs : undefined);
+        } else {
+          runTypeNames = await resolveTypeNamesOnUser(oids);
+        }
         const columns: Column[] = rawColumns.map((c) => ({
           name: c.name,
-          type: typeNames.get(c.type) ?? String(c.type),
+          type: typeNames.get(c.type) ?? runTypeNames?.get(c.type) ?? String(c.type),
         }));
 
         const durationMs = performance.now() - start;
@@ -757,38 +1120,15 @@ export async function openPostgres(
     },
 
     async schema(): Promise<SchemaSnapshot> {
-      if (closed) {
-        throw new QueryError("the Session is closed");
-      }
-
-      const activeSchemaQueries = new Set<{ cancel: () => Promise<void> }>();
-      let rejectOnClose: ((err: QueryError) => void) | null = null;
-      const closeInterrupt = new Promise<never>((_, reject) => {
-        rejectOnClose = reject;
-      });
-      const cancelSchema = async () => {
-        rejectOnClose?.(new QueryError("the Session is closed"));
-        await Promise.allSettled(
-          [...activeSchemaQueries].map((q) => q.cancel().catch(() => {})),
-        );
-      };
-      activeQueries.add(cancelSchema);
-
-      const trackSchemaQuery = <T extends object>(q: Promise<T> & { cancel: () => Promise<void> }): Promise<T> => {
-        activeSchemaQueries.add(q);
-        return q.finally(() => {
-          activeSchemaQueries.delete(q);
-        });
-      };
-
       try {
-        return await Promise.race([
-          closeInterrupt,
-          (async (): Promise<SchemaSnapshot> => {
-            const relRows = await trackSchemaQuery(
-              side.unsafe<{ oid: number; nspname: string; relname: string; relkind: string }[]>(
-                "select c.oid::int as oid, n.nspname, c.relname, c.relkind from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.relkind in ('r','p','v','m') and n.nspname not in ('pg_catalog','information_schema') and n.nspname not like 'pg\\_toast%' and n.nspname not like 'pg\\_temp%' order by n.nspname, c.relname",
-              ),
+        return await withSide(
+          async (): Promise<SchemaSnapshot> => {
+            const relRows = await sideQuery<
+              { oid: number; nspname: string; relname: string; relkind: string }[]
+            >(
+              "select c.oid::int as oid, n.nspname, c.relname, c.relkind from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.relkind in ('r','p','v','m','f') and n.nspname not in ('pg_catalog','information_schema') and n.nspname not like 'pg\\_toast%' and n.nspname not like 'pg\\_temp%' order by n.nspname, c.relname",
+              [],
+              undefined,
             );
 
             if (relRows.length === 0) {
@@ -797,40 +1137,37 @@ export async function openPostgres(
 
             const relOids = relRows.map((r) => Number(r.oid));
 
-            const [colRows, pkRows, fkRows] = await Promise.all([
-              trackSchemaQuery(
-                side.unsafe<
-                  {
-                    rel_oid: number;
-                    attnum: number;
-                    name: string;
-                    type: string;
-                    notnull: boolean;
-                  }[]
-                >(
-                  "select a.attrelid::int as rel_oid, a.attnum::int as attnum, a.attname as name, t.typname as type, a.attnotnull as notnull from pg_attribute a join pg_type t on t.oid = a.atttypid where a.attrelid = any($1) and a.attnum > 0 and not a.attisdropped order by a.attrelid, a.attnum",
-                  [relOids],
-                ),
+            const [colRows, pkRows, fkRows] = await settleAll([
+              sideQuery<
+                {
+                  rel_oid: number;
+                  attnum: number;
+                  name: string;
+                  type: string;
+                  notnull: boolean;
+                }[]
+              >(
+                "select a.attrelid::int as rel_oid, a.attnum::int as attnum, a.attname as name, t.typname as type, a.attnotnull as notnull from pg_attribute a join pg_type t on t.oid = a.atttypid where a.attrelid = any($1) and a.attnum > 0 and not a.attisdropped order by a.attrelid, a.attnum",
+                [relOids],
+                undefined,
               ),
-              trackSchemaQuery(
-                side.unsafe<{ rel_oid: number; attnum: number }[]>(
-                  "select conrelid::int as rel_oid, unnest(conkey)::int as attnum from pg_constraint where conrelid = any($1) and contype = 'p'",
-                  [relOids],
-                ),
+              sideQuery<{ rel_oid: number; attnum: number }[]>(
+                "select conrelid::int as rel_oid, unnest(conkey)::int as attnum from pg_constraint where conrelid = any($1) and contype = 'p'",
+                [relOids],
+                undefined,
               ),
-              trackSchemaQuery(
-                side.unsafe<
-                  {
-                    rel_oid: number;
-                    attnum: number;
-                    ref_schema: string;
-                    ref_table: string;
-                    ref_column: string;
-                  }[]
-                >(
-                  "select con.conrelid::int as rel_oid, u.attnum::int as attnum, fn.nspname as ref_schema, fc.relname as ref_table, fa.attname as ref_column from pg_constraint con cross join lateral unnest(con.conkey, con.confkey) as u(attnum, ref_attnum) join pg_class fc on fc.oid = con.confrelid join pg_namespace fn on fn.oid = fc.relnamespace join pg_attribute fa on fa.attrelid = con.confrelid and fa.attnum = u.ref_attnum where con.conrelid = any($1) and con.contype = 'f'",
-                  [relOids],
-                ),
+              sideQuery<
+                {
+                  rel_oid: number;
+                  attnum: number;
+                  ref_schema: string;
+                  ref_table: string;
+                  ref_column: string;
+                }[]
+              >(
+                "select con.conrelid::int as rel_oid, u.attnum::int as attnum, fn.nspname as ref_schema, fc.relname as ref_table, fa.attname as ref_column from pg_constraint con cross join lateral unnest(con.conkey, con.confkey) as u(attnum, ref_attnum) join pg_class fc on fc.oid = con.confrelid join pg_namespace fn on fn.oid = fc.relnamespace join pg_attribute fa on fa.attrelid = con.confrelid and fa.attnum = u.ref_attnum where con.conrelid = any($1) and con.contype = 'f'",
+                [relOids],
+                undefined,
               ),
             ]);
 
@@ -881,7 +1218,7 @@ export async function openPostgres(
               }
               relations.push({
                 name: rel.relname,
-                kind: rel.relkind === "r" || rel.relkind === "p" ? "table" : "view",
+                kind: relationKind(rel.relkind),
                 columns: colsByRel.get(Number(rel.oid)) ?? [],
               });
             }
@@ -890,15 +1227,32 @@ export async function openPostgres(
               dialect: "postgres",
               namespaces,
             };
-          })(),
-        ]);
+          },
+          { interruptOnClose: true },
+        );
       } catch (err) {
         if (closed) {
-          throw new QueryError("the Session is closed");
+          throw sessionClosedError();
         }
         throw toQueryError(err, secrets);
-      } finally {
-        activeQueries.delete(cancelSchema);
+      }
+    },
+
+    async describeRelation(
+      ref: RelationRef,
+      options?: { signal?: AbortSignal },
+    ): Promise<RelationDetails | null> {
+      const signal = options?.signal;
+      try {
+        return await withSide(() => describeOnSide(ref, signal), {
+          signal,
+          interruptOnClose: true,
+        });
+      } catch (err) {
+        if (closed) {
+          throw sessionClosedError();
+        }
+        throw toQueryError(err, secrets);
       }
     },
 

@@ -260,7 +260,8 @@ export function buildPrompt(input: {
   dataAccess: "rows" | "schema";
   forceAnswer: boolean;
   correction?: string;
-  hasWorkspaceTools?: boolean;
+  hasReadBuffer?: boolean;
+  hasReadResults?: boolean;
 }): string {
   const {
     connection,
@@ -270,7 +271,8 @@ export function buildPrompt(input: {
     dataAccess,
     forceAnswer,
     correction,
-    hasWorkspaceTools = false,
+    hasReadBuffer = false,
+    hasReadResults = false,
   } = input;
 
   const actionLines = [
@@ -280,11 +282,11 @@ export function buildPrompt(input: {
     '{"action":"explain","sql":"<one SQL statement to inspect its execution plan>","why":"<short reason>"}',
     '{"action":"describe","relations":["<relation name>"]}',
   ];
-  if (hasWorkspaceTools) {
-    actionLines.push(
-      '{"action":"read_buffer","name":"<optional open editor buffer name>"}',
-      '{"action":"read_results"}',
-    );
+  if (hasReadBuffer) {
+    actionLines.push('{"action":"read_buffer","name":"<optional open editor buffer name>"}');
+  }
+  if (hasReadResults) {
+    actionLines.push('{"action":"read_results"}');
   }
   actionLines.push(
     '{"action":"answer","message":"<what to tell the user>","sql":"<the final SQL, when there is one>"}',
@@ -303,10 +305,13 @@ export function buildPrompt(input: {
     '- To change data, put the statement in the "sql" of your answer. The user decides whether to run it.',
     '- Use only relations and columns from the schema. Use "describe" when you need more detail and "query" to check real values.',
   ];
-  if (hasWorkspaceTools) {
+  if (hasReadBuffer) {
     ruleLines.push(
-      '- <context> shows the SQL currently open in the user\'s editor buffer when present, so the user does not need to paste it. Use "read_buffer" to inspect other open buffers and "read_results" to inspect rows currently shown in the Results pane.',
+      '- <context> shows the SQL currently open in the user\'s editor buffer when present, so the user does not need to paste it. Use "read_buffer" to inspect other open buffers.',
     );
+  }
+  if (hasReadResults) {
+    ruleLines.push('- Use "read_results" to inspect rows currently shown in the Results pane.');
   }
   ruleLines.push(
     '- Keep "message" short: what the SQL does and anything the user should know.',

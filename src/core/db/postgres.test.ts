@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { openSession, parseConnection } from "./connection";
 import { openPostgres, resolvePostgresTarget } from "./postgres";
-import { QueryError, type Driver } from "./types";
+import { QueryError, type Driver, type RelationDetails, type RelationRef } from "./types";
 
 const url = process.env.LOSQL_TEST_PG_URL;
 const suite = url ? describe : describe.skip;
@@ -885,4 +885,579 @@ describe("final-c2 fix 2: the Driver reports a main connection that was closed u
     // Closing the Driver is not a loss.
     expect(driver.takeLostConnection!()).toBe(false);
   });
+});
+
+/**
+ * Calls the optional `describeRelation` the way the app does, turning a missing method into a
+ * rejection instead of a synchronous throw so a red run still reaches its assertions.
+ */
+function callDescribe(
+  driver: Driver,
+  ref: RelationRef,
+  options?: { signal?: AbortSignal },
+): Promise<RelationDetails | null> {
+  return Promise.resolve().then(() => {
+    const describe = driver.describeRelation;
+    if (typeof describe !== "function") {
+      throw new TypeError("driver.describeRelation is not a function");
+    }
+    return describe.call(driver, ref, options);
+  });
+}
+
+suite("postgres relation details and the side queue", () => {
+  const schema = `losql_d_${Date.now().toString(36)}`;
+  const ref = (name: string): RelationRef => ({ namespace: schema, name });
+  let driver: Driver;
+
+  beforeAll(async () => {
+    driver = await openSession(parseConnection(url!));
+    await driver.run(`create schema ${schema}`);
+    await driver.run(`set search_path = ${schema}`);
+    await driver.run("create table parent (a int not null, b int not null, primary key (a, b))");
+    await driver.run(`create table child (
+      k1 int not null,
+      k2 int not null,
+      p_a int,
+      p_b int,
+      i_a int,
+      i_b int,
+      note text,
+      code text,
+      active boolean not null default true,
+      status text not null default 'open',
+      label text,
+      maybe int default null,
+      doubled int generated always as (p_a * 2) stored,
+      constraint child_pkey primary key (k1, k2),
+      constraint child_parent_explicit_fk foreign key (p_a, p_b)
+        references parent (a, b) on delete cascade on update restrict,
+      constraint child_parent_implicit_fk foreign key (i_a, i_b) references parent,
+      constraint child_code_unique unique (code, k1),
+      constraint child_active_check check (active = true)
+    )`);
+    await driver.run(
+      "create unique index child_expr_idx on child (lower(code), p_a) include (note) where active = true",
+    );
+    await driver.run("create view child_view as select k1, code from child where active");
+    await driver.run("create materialized view child_mv as select k1, note from child");
+  });
+
+  afterAll(async () => {
+    await driver.run(`drop schema ${schema} cascade`);
+    await driver.close();
+  });
+
+  test("describeRelation returns columns in attnum order with defaults, generated expressions and foreign keys", async () => {
+    expect(typeof driver.describeRelation).toBe("function");
+
+    const details = await callDescribe(driver, ref("child"));
+    expect(details).not.toBeNull();
+    expect(details!.namespace).toBe(schema);
+    expect(details!.name).toBe("child");
+    expect(details!.kind).toBe("table");
+
+    const columns = details!.columns;
+    expect(columns.map((c) => c.name)).toEqual([
+      "k1",
+      "k2",
+      "p_a",
+      "p_b",
+      "i_a",
+      "i_b",
+      "note",
+      "code",
+      "active",
+      "status",
+      "label",
+      "maybe",
+      "doubled",
+    ]);
+
+    const byName = new Map(columns.map((c) => [c.name, c]));
+
+    expect(byName.get("k1")).toMatchObject({ type: "integer", nullable: false, primaryKeyPosition: 1 });
+    expect(byName.get("k2")).toMatchObject({ type: "integer", nullable: false, primaryKeyPosition: 2 });
+    expect(byName.get("p_a")).toMatchObject({ type: "integer", nullable: true });
+    expect(byName.get("p_a")!.primaryKeyPosition).toBeUndefined();
+    expect(byName.get("note")!.type).toBe("text");
+    expect(byName.get("code")!.type).toBe("text");
+
+    // A non-null DEFAULT is a default, never a generated expression.
+    expect(byName.get("active")).toMatchObject({ type: "boolean", nullable: false });
+    expect(byName.get("active")!.defaultValue).toContain("true");
+    expect(byName.get("active")!.generated).toBeUndefined();
+    expect(byName.get("status")!.type).toBe("text");
+    expect(byName.get("status")!.defaultValue).toContain("open");
+    expect(byName.get("status")!.generated).toBeUndefined();
+
+    // No declared default at all.
+    expect(byName.get("label")!.type).toBe("text");
+    expect(byName.get("label")!.defaultValue).toBeUndefined();
+    expect(byName.get("label")!.generated).toBeUndefined();
+
+    // DEFAULT NULL may be normalized away by the server or kept as "NULL"; it is never generated.
+    const maybeDefault = byName.get("maybe")!.defaultValue;
+    expect(maybeDefault === undefined || maybeDefault === "NULL").toBe(true);
+    expect(byName.get("maybe")!.generated).toBeUndefined();
+
+    // GENERATED ALWAYS AS (...) STORED: an expression or kind, never a default.
+    const generated = byName.get("doubled")!.generated;
+    expect(typeof generated).toBe("string");
+    expect(String(generated).toLowerCase()).toMatch(/p_a|stored|^s$/);
+    expect(byName.get("doubled")!.defaultValue).toBeUndefined();
+
+    // Per-column foreign key references, ordered and carrying actions and constraint names.
+    expect(byName.get("k1")!.references).toEqual([]);
+    const pARefs = byName.get("p_a")!.references;
+    expect(pARefs).toHaveLength(1);
+    expect(pARefs[0]).toMatchObject({
+      namespace: schema,
+      relation: "parent",
+      column: "a",
+      constraintName: "child_parent_explicit_fk",
+      onDelete: "CASCADE",
+      onUpdate: "RESTRICT",
+    });
+    expect(byName.get("p_b")!.references[0]).toMatchObject({
+      namespace: schema,
+      relation: "parent",
+      column: "b",
+      constraintName: "child_parent_explicit_fk",
+      onDelete: "CASCADE",
+      onUpdate: "RESTRICT",
+    });
+    expect(byName.get("i_a")!.references[0]).toMatchObject({
+      namespace: schema,
+      relation: "parent",
+      column: "a",
+      constraintName: "child_parent_implicit_fk",
+      onDelete: "NO ACTION",
+      onUpdate: "NO ACTION",
+    });
+    expect(byName.get("i_b")!.references[0]).toMatchObject({
+      namespace: schema,
+      relation: "parent",
+      column: "b",
+      constraintName: "child_parent_implicit_fk",
+      onDelete: "NO ACTION",
+      onUpdate: "NO ACTION",
+    });
+  }, 20000);
+
+  test("describeRelation separates primary, unique and expression/partial/INCLUDE index metadata", async () => {
+    const details = await callDescribe(driver, ref("child"));
+    expect(details).not.toBeNull();
+    const indexes = details!.indexes;
+    expect(indexes).toBeDefined();
+
+    const primaryIndex = indexes!.find((i) => i.primary === true);
+    expect(primaryIndex).toBeDefined();
+    expect(primaryIndex!.unique).toBe(true);
+    expect(primaryIndex!.name).toBe("child_pkey");
+    expect(primaryIndex!.columns).toEqual(["k1", "k2"]);
+
+    const uniqueIndex = indexes!.find((i) => i.name === "child_code_unique");
+    expect(uniqueIndex).toBeDefined();
+    expect(uniqueIndex!.unique).toBe(true);
+    expect(uniqueIndex!.primary).toBe(false);
+    expect(uniqueIndex!.columns).toEqual(["code", "k1"]);
+
+    const expressionIndex = indexes!.find((i) => i.name === "child_expr_idx");
+    expect(expressionIndex).toBeDefined();
+    expect(expressionIndex!.unique).toBe(true);
+    expect(expressionIndex!.primary).toBe(false);
+    expect(expressionIndex!.method).toBe("btree");
+    expect(expressionIndex!.columns).toHaveLength(2);
+    expect(expressionIndex!.columns[0]).toContain("lower");
+    expect(expressionIndex!.columns[0]).toContain("code");
+    expect(expressionIndex!.columns[1]).toBe("p_a");
+    expect(expressionIndex!.includedColumns).toEqual(["note"]);
+    expect(expressionIndex!.predicate).toContain("active");
+    expect(expressionIndex!.definition).toContain("CREATE UNIQUE INDEX");
+  }, 20000);
+
+  test("describeRelation reports primary, unique, foreign key and check constraints in order", async () => {
+    const details = await callDescribe(driver, ref("child"));
+    expect(details).not.toBeNull();
+    const constraints = details!.constraints;
+    expect(constraints).toBeDefined();
+
+    const primaryKey = constraints!.find((c) => c.kind === "PRIMARY KEY");
+    expect(primaryKey).toBeDefined();
+    expect(primaryKey!.columns).toEqual(["k1", "k2"]);
+
+    const unique = constraints!.find((c) => c.kind === "UNIQUE");
+    expect(unique).toBeDefined();
+    expect(unique!.name).toBe("child_code_unique");
+    expect(unique!.columns).toEqual(["code", "k1"]);
+
+    const explicitFk = constraints!.find((c) => c.name === "child_parent_explicit_fk");
+    expect(explicitFk).toBeDefined();
+    expect(explicitFk!.kind).toBe("FOREIGN KEY");
+    expect(explicitFk!.columns).toEqual(["p_a", "p_b"]);
+    expect(explicitFk!.references).toMatchObject({
+      namespace: schema,
+      relation: "parent",
+      columns: ["a", "b"],
+      onDelete: "CASCADE",
+      onUpdate: "RESTRICT",
+    });
+
+    const implicitFk = constraints!.find((c) => c.name === "child_parent_implicit_fk");
+    expect(implicitFk).toBeDefined();
+    expect(implicitFk!.kind).toBe("FOREIGN KEY");
+    expect(implicitFk!.columns).toEqual(["i_a", "i_b"]);
+    expect(implicitFk!.references).toMatchObject({
+      namespace: schema,
+      relation: "parent",
+      columns: ["a", "b"],
+      onDelete: "NO ACTION",
+      onUpdate: "NO ACTION",
+    });
+
+    const check = constraints!.find((c) => c.kind === "CHECK");
+    expect(check).toBeDefined();
+    expect(check!.name).toBe("child_active_check");
+    expect(check!.definition).toContain("active");
+  }, 20000);
+
+  test("describeRelation describes views and materialized views and returns null for missing relations", async () => {
+    const view = await callDescribe(driver, ref("child_view"));
+    expect(view).not.toBeNull();
+    expect(view!.namespace).toBe(schema);
+    expect(view!.name).toBe("child_view");
+    expect(view!.kind).toBe("view");
+    expect(view!.columns.map((c) => c.name)).toEqual(["k1", "code"]);
+    expect(view!.columns.map((c) => c.type)).toEqual(["integer", "text"]);
+    expect(typeof view!.definition).toBe("string");
+    expect(view!.definition!.toLowerCase()).toContain("select");
+
+    const materializedView = await callDescribe(driver, ref("child_mv"));
+    expect(materializedView).not.toBeNull();
+    expect(materializedView!.name).toBe("child_mv");
+    expect(materializedView!.kind).toBe("view");
+    expect(materializedView!.columns.map((c) => c.name)).toEqual(["k1", "note"]);
+    expect(materializedView!.columns.map((c) => c.type)).toEqual(["integer", "text"]);
+    expect(typeof materializedView!.definition).toBe("string");
+    expect(materializedView!.definition!.toLowerCase()).toContain("select");
+
+    expect(await callDescribe(driver, ref("no_such_relation"))).toBeNull();
+    expect(await callDescribe(driver, { namespace: `${schema}_missing`, name: "child" })).toBeNull();
+  }, 20000);
+
+  test("describeRelation does not match a longer name by its first 63 bytes", async () => {
+    const longName = `t${"x".repeat(62)}`;
+    expect(Buffer.byteLength(longName)).toBe(63);
+    await driver.run(`create table ${schema}.${longName} (id int)`);
+    try {
+      const exact = await callDescribe(driver, ref(longName));
+      expect(exact).not.toBeNull();
+      expect(exact!.name).toBe(longName);
+
+      expect(await callDescribe(driver, ref(`${longName}y`))).toBeNull();
+    } finally {
+      await driver.run(`drop table ${schema}.${longName}`);
+    }
+  }, 20000);
+
+  test("a read-only Run returning an unseeded type overlaps schema() and describeRelation() without interleaving", async () => {
+    const id = "11111111-1111-1111-1111-111111111111";
+    const [readOnlyRun, snapshot, details] = await Promise.all([
+      driver.run(`select array['${id}']::uuid[] as ids`, { readOnly: true }),
+      driver.schema(),
+      callDescribe(driver, ref("child")),
+    ]);
+
+    expect(readOnlyRun.columns.map((c) => c.name)).toEqual(["ids"]);
+    expect(readOnlyRun.rows).toHaveLength(1);
+    expect(String(readOnlyRun.rows[0]![0])).toContain(id);
+
+    expect(snapshot.dialect).toBe("postgres");
+    expect(snapshot.namespaces.find((n) => n.name === schema)).toBeDefined();
+
+    expect(details).not.toBeNull();
+    expect(details!.name).toBe("child");
+    expect(details!.columns.map((c) => c.name)).toContain("doubled");
+
+    // No leaked transaction, timeout or advisory-lock state: the side client is still usable.
+    expect((await driver.run("select 1 as ok", { readOnly: true })).rows).toEqual([[1]]);
+    expect((await callDescribe(driver, ref("child")))!.name).toBe("child");
+  }, 20000);
+
+  test("a queued describeRelation() aborts while a read-only Run holds the side client, and the next queued operation still runs", async () => {
+    const controller = new AbortController();
+    let holderSettled = false;
+    let holderError: unknown = null;
+    const holder = driver
+      .run("select pg_advisory_lock(91), pg_sleep(1.5)", { readOnly: true })
+      .then(
+        () => {
+          holderSettled = true;
+        },
+        (e) => {
+          holderSettled = true;
+          holderError = e;
+        },
+      );
+
+    const startedAt = performance.now();
+    const aborted = callDescribe(driver, ref("child"), { signal: controller.signal }).then(
+      () => null,
+      (e) => e,
+    );
+    const queuedSchema = driver.schema();
+    setTimeout(() => controller.abort(), 200);
+
+    const abortError = await aborted;
+    const abortedAfterMs = performance.now() - startedAt;
+    expect(abortError).toBeInstanceOf(QueryError);
+    expect(abortedAfterMs).toBeLessThan(1000);
+    expect(holderSettled).toBe(false);
+
+    await holder;
+    expect(holderError).toBeNull();
+    const snapshot = await queuedSchema;
+    expect(snapshot.namespaces.find((n) => n.name === schema)).toBeDefined();
+    expect((await driver.run("select 1 as ok", { readOnly: true })).rows).toEqual([[1]]);
+  }, 20000);
+
+  test("a read-only Run's type-name lookup stays within its timeoutMs when other side work is queued", async () => {
+    // A fresh Session, so `inet` is not in its type name cache yet.
+    const session = await openSession(parseConnection(url!));
+    try {
+      const startedAt = performance.now();
+      const timed = session
+        .run("select pg_sleep(0.1), '1.2.3.4'::inet as addr", { readOnly: true, timeoutMs: 600 })
+        .then(
+          (result) => ({ result, error: null as unknown, at: performance.now() - startedAt }),
+          (error) => ({ result: null, error, at: performance.now() - startedAt }),
+        );
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      // Queued behind the timed Run's transaction, ahead of its type-name lookup.
+      const blocker = session.run("select pg_sleep(1.5) as slept", { readOnly: true });
+
+      const outcome = await timed;
+      expect(outcome.result).toBeNull();
+      expect(outcome.error).toBeInstanceOf(QueryError);
+      expect((outcome.error as QueryError).code).toBe("57014");
+      expect((outcome.error as QueryError).message).toContain("statement timeout");
+      expect(outcome.at).toBeLessThan(1100);
+
+      expect((await blocker).rows).toHaveLength(1);
+      const later = await session.run("select '5.6.7.8'::inet as addr", { readOnly: true });
+      expect(later.columns).toEqual([{ name: "addr", type: "inet" }]);
+    } finally {
+      await session.close();
+    }
+  }, 20000);
+
+  test("a read-only Run's in-flight type-name lookup is canceled at its timeoutMs and the side client stays usable", async () => {
+    // A fresh Session; its warm-up Run fills the side backend's catalog cache for the statements
+    // around a read-only Run, so only the pg_type lookup itself waits for the lock below.
+    const session = await openSession(parseConnection(url!));
+    const locker = await openSession(parseConnection(url!));
+    let lockHeld = false;
+    try {
+      await session.run("select '1.2.3.4'::inet as addr", { readOnly: true });
+
+      const startedAt = performance.now();
+      const timed = session
+        .run("select pg_sleep(0.3), '08:00:2b:01:02:03'::macaddr as mac", {
+          readOnly: true,
+          timeoutMs: 800,
+        })
+        .then(
+          (result) => ({ result, error: null as unknown, at: performance.now() - startedAt }),
+          (error) => ({ result: null, error, at: performance.now() - startedAt }),
+        );
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      // Taken after the Run's statement was parsed: its type-name lookup on pg_type now blocks.
+      await locker.run("begin");
+      lockHeld = true;
+      await locker.run("lock table pg_catalog.pg_type in access exclusive mode");
+
+      const outcome = await Promise.race([
+        timed,
+        new Promise<"hung">((resolve) => setTimeout(() => resolve("hung"), 3000)),
+      ]);
+      expect(outcome).not.toBe("hung");
+      const settled = outcome as Exclude<typeof outcome, "hung">;
+      expect(settled.result).toBeNull();
+      expect(settled.error).toBeInstanceOf(QueryError);
+      expect((settled.error as QueryError).code).toBe("57014");
+      expect((settled.error as QueryError).message).toContain("statement timeout");
+      expect(settled.at).toBeLessThan(1300);
+
+      // The lookup was canceled, so the side client is free while pg_type is still locked.
+      const next = await Promise.race([
+        session.run("select 1 as ok", { readOnly: true }),
+        new Promise<"hung">((resolve) => setTimeout(() => resolve("hung"), 3000)),
+      ]);
+      expect(next).not.toBe("hung");
+      expect((next as Awaited<ReturnType<Driver["run"]>>).rows).toEqual([[1]]);
+
+      await locker.run("rollback");
+      lockHeld = false;
+      const later = await session.run("select '08:00:2b:01:02:04'::macaddr as mac", { readOnly: true });
+      expect(later.columns).toEqual([{ name: "mac", type: "macaddr" }]);
+      expect(later.rows).toEqual([["08:00:2b:01:02:04"]]);
+    } finally {
+      if (lockHeld) await locker.run("rollback").catch(() => {});
+      await locker.close();
+      await session.close();
+    }
+  }, 20000);
+
+  test("a user-connection Run with an uncached type does not wait for a side client blocked by its own transaction", async () => {
+    await driver.run(`create table ${schema}.locked_by_user (id int)`);
+    // A fresh Session, so `inet` is not in its type name cache yet.
+    const session = await openSession(parseConnection(url!));
+    try {
+      await session.run("begin");
+      await session.run(`lock table ${schema}.locked_by_user in access exclusive mode`);
+      // Holds the side client while it waits for the user connection's lock.
+      const blocked = session
+        .run(`select count(*)::int as n from ${schema}.locked_by_user`, { readOnly: true })
+        .then(
+          (result) => result,
+          (error) => error,
+        );
+      await new Promise((resolve) => setTimeout(resolve, 150));
+
+      const outcome = await Promise.race([
+        session.run("select '10.0.0.1'::inet as ip"),
+        new Promise<"hung">((resolve) => setTimeout(() => resolve("hung"), 3000)),
+      ]);
+      expect(outcome).not.toBe("hung");
+      const result = outcome as Awaited<ReturnType<Driver["run"]>>;
+      // Resolved on the user connection itself, inside the open transaction.
+      expect(result.columns).toEqual([{ name: "ip", type: "inet" }]);
+      expect(result.rows).toEqual([["10.0.0.1"]]);
+
+      // The lookup left the transaction usable: it still holds the lock and commits cleanly.
+      expect((await session.run("select 1 as one")).rows).toEqual([[1]]);
+      await session.run("rollback");
+      expect((await blocked).rows).toEqual([[0]]);
+
+      const later = await session.run("select '10.0.0.2'::inet as ip");
+      expect(later.columns).toEqual([{ name: "ip", type: "inet" }]);
+    } finally {
+      await session.close();
+    }
+  }, 20000);
+
+  test("a user-connection Run resolves an uncached type while unrelated side work is running", async () => {
+    // A fresh Session, so `cidr` is not in its type name cache yet.
+    const session = await openSession(parseConnection(url!));
+    try {
+      const sleeper = session.run("select pg_sleep(2) as slept", { readOnly: true }).then(
+        (result) => result,
+        (error) => error,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 150));
+
+      const startedAt = performance.now();
+      const result = await session.run("select '10.0.0.0/8'::cidr as net");
+      expect(performance.now() - startedAt).toBeLessThan(1000);
+      expect(result.columns).toEqual([{ name: "net", type: "cidr" }]);
+      expect(result.rows).toEqual([["10.0.0.0/8"]]);
+
+      expect((await sleeper).columns).toEqual([{ name: "slept", type: "void" }]);
+    } finally {
+      await session.close();
+    }
+  }, 20000);
+
+  test("a user-connection Run names a type created in its own open transaction", async () => {
+    const session = await openSession(parseConnection(url!));
+    try {
+      await session.run("begin");
+      await session.run(`create type ${schema}.tx_mood as enum ('happy')`);
+      const inTx = await session.run(`select 'happy'::${schema}.tx_mood as mood`);
+      expect(inTx.columns).toEqual([{ name: "mood", type: "tx_mood" }]);
+      await session.run("rollback");
+    } finally {
+      await session.close();
+    }
+  }, 20000);
+
+  test("a failed type-name lookup never aborts the user's open transaction", async () => {
+    await driver.run(`create table ${schema}.kept_by_tx (id int)`);
+    // A fresh Session, so `inet` is not in its type name cache yet.
+    const session = await openSession(parseConnection(url!));
+    const locker = await openSession(parseConnection(url!));
+    let lockHeld = false;
+    try {
+      await session.run("begin");
+      await session.run("set local lock_timeout = '10ms'");
+      await session.run(`insert into ${schema}.kept_by_tx values (1)`);
+      // Warms the backend's own caches for inet without returning a column to name.
+      await session.run("select from (select '127.0.0.1'::inet) s");
+
+      await locker.run("begin");
+      try {
+        await locker.run("set local lock_timeout = '2s'");
+        await locker.run("lock table pg_catalog.pg_type in access exclusive mode");
+        lockHeld = true;
+      } catch (err) {
+        // Only a role that may lock pg_type can run this case.
+        if (err instanceof QueryError && err.code === "42501") return;
+        throw err;
+      }
+
+      // The statement itself succeeds; its type-name lookup hits lock_timeout on pg_type.
+      const result = await session.run("select '127.0.0.1'::inet as ip");
+      expect(result.rows).toEqual([["127.0.0.1"]]);
+      expect(result.columns).toEqual([{ name: "ip", type: "869" }]);
+
+      await locker.run("rollback");
+      lockHeld = false;
+
+      // The transaction is still alive: it runs statements and its insert is committed.
+      expect((await session.run("select 1 as one")).rows).toEqual([[1]]);
+      await session.run("commit");
+      const kept = await driver.run(`select count(*)::int as n from ${schema}.kept_by_tx`);
+      expect(kept.rows).toEqual([[1]]);
+    } finally {
+      if (lockHeld) await locker.run("rollback").catch(() => {});
+      await session.run("rollback").catch(() => {});
+      await locker.close();
+      await session.close();
+    }
+  }, 20000);
+
+  test("close() rejects queued describeRelation() and schema() callers with a closed-Session QueryError", async () => {
+    const session = await openSession(parseConnection(url!));
+    const startedAt = performance.now();
+    const holder = session.run("select pg_sleep(10)", { readOnly: true }).then(
+      () => null,
+      (e) => e,
+    );
+    const queuedDescribe = callDescribe(session, ref("child")).then(
+      () => null,
+      (e) => e,
+    );
+    const queuedSchema = session.schema().then(
+      () => null,
+      (e) => e,
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    await session.close();
+
+    const [holderError, describeError, schemaError] = await Promise.all([
+      holder,
+      queuedDescribe,
+      queuedSchema,
+    ]);
+    const settledAfterMs = performance.now() - startedAt;
+
+    expect(holderError).toBeInstanceOf(QueryError);
+    expect(describeError).toBeInstanceOf(QueryError);
+    expect(describeError.message).toBe("the Session is closed");
+    expect(schemaError).toBeInstanceOf(QueryError);
+    expect(schemaError.message).toBe("the Session is closed");
+    expect(settledAfterMs).toBeLessThan(3000);
+  }, 20000);
 });

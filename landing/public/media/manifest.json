@@ -1,163 +1,171 @@
 {
-  "binarySha256": "a5365827e47f2d8e2f83bad5332025a850bf4d691220407741586b650aef62c1",
-  "capturedAt": "2026-11-16T06:01:27.920Z",
+  "binarySha256": "6f6d665caf6c4db342aad5a031ccc1c1898ba9fb20fe4c6b6cd2714023936ef3",
+  "capturedAt": "2026-11-23T23:29:05.524Z",
   "providerMode": "deterministic local protocol fixtures; real SQLite queries",
   "assets": {
     "hero.webp": {
-      "sha256": "11301929ea3922360356881584667209b1ce416b414d7d80e8074483f16f71bf",
-      "bytes": 74056,
+      "sha256": "b2a842d37ace1b29416bd7619219cafd04d4f8ff1aded8396f7de7ab54b22e81",
+      "bytes": 75686,
       "width": 1480,
       "height": 980,
       "animated": false,
       "frames": 1
     },
     "editor.webp": {
-      "sha256": "90c34657de265ecc11dbc6bc3c92c38c7d5e8466e52d7336ac26b0b1da8365ee",
-      "bytes": 81882,
+      "sha256": "6bce0c354b6649f2d2781d90b4da49c80680bc13a9d431cbf55ecc0848ffc2d0",
+      "bytes": 83446,
       "width": 1480,
       "height": 980,
       "animated": false,
       "frames": 1
     },
     "agent.webp": {
-      "sha256": "6efa635843c3793d7c471cc9314b33febd50e24f05f835608751d961eeb452de",
-      "bytes": 73964,
+      "sha256": "135a3a7404cd8aaec30186b5745a089e5983a4faea928d21b83fafb71c27b2a0",
+      "bytes": 75444,
       "width": 1480,
       "height": 980,
       "animated": false,
       "frames": 1
     },
     "json.webp": {
-      "sha256": "d609744ad16a55e12c2b28f5675d9408b15b9c2685b0b2bb23b11fa48a7d04e8",
-      "bytes": 71396,
+      "sha256": "b752e66c27c768f2c484e0e8820005126a0403f8d4db68c6f0fe539272e2cc30",
+      "bytes": 73082,
       "width": 1480,
       "height": 980,
       "animated": false,
       "frames": 1
     },
     "record.webp": {
-      "sha256": "b8d1855c0eb57c40cf5ef47c6f4a9981499fbcbe3385477bd63b89e74e173ad0",
-      "bytes": 66410,
+      "sha256": "6fd8a1a808899a7044c0e92a0b2172b0d730ca505a9113ed61288ff095ef95a3",
+      "bytes": 67266,
+      "width": 1480,
+      "height": 980,
+      "animated": false,
+      "frames": 1
+    },
+    "structure.webp": {
+      "sha256": "ea1d51ff3cebb8e8e3419dd0344914d9fcb2ff00da4b218629edf32d335bcbfb",
+      "bytes": 29388,
       "width": 1480,
       "height": 980,
       "animated": false,
       "frames": 1
     },
     "zoom.webp": {
-      "sha256": "e8572e4dae3d4e9a9c0e2ef52971afa1b0b0908afdda68a38653b48f560326a1",
-      "bytes": 23564,
+      "sha256": "1caa66a75351ed8560dd8a2128723ddd38af776ad190ed65be54f3dedcb61492",
+      "bytes": 24626,
       "width": 1480,
       "height": 980,
       "animated": false,
       "frames": 1
     },
     "providers.webp": {
-      "sha256": "c5fdef74a778a327ffe3e20b7714fbdfc6ce5bd96fa754a25d6d4efd5d376ae8",
-      "bytes": 72892,
+      "sha256": "6b92514f0753769a20358c25fdb179320eb35612eb1a64d119e597d8e5dc338c",
+      "bytes": 73080,
       "width": 1480,
       "height": 980,
       "animated": false,
       "frames": 1
     },
     "themes.webp": {
-      "sha256": "da44f4edefedcacbc35da4c9dade4f9bc3d28e06691827959727b5fd9d36319b",
-      "bytes": 61624,
+      "sha256": "655bb02e759949f59ee8243193038d597d5aeda451c0ee1bf1add2f4b8dfa0fc",
+      "bytes": 62448,
       "width": 1480,
       "height": 980,
       "animated": false,
       "frames": 1
     },
     "menu.webp": {
-      "sha256": "ee6974f2e51e2efcb5a9ec7d3dd4aaffa47c0a7cca10d0ee070174f1d54ea81c",
-      "bytes": 82548,
+      "sha256": "6082791fcc4858d3983806db93c6e514d9474565ec9e0af13d66034343a017ae",
+      "bytes": 82728,
       "width": 1480,
       "height": 980,
       "animated": false,
       "frames": 1
     },
     "onboarding.webp": {
-      "sha256": "161897628524e5e81cfeb896ec9be71a6f2223102b6026eab021175117a657bb",
-      "bytes": 13252,
+      "sha256": "70e185f95ba98bc87151e60c7566465aaebb3cc24c1e0fd4ffc7c15a703f6ab3",
+      "bytes": 13246,
       "width": 1480,
       "height": 980,
       "animated": false,
       "frames": 1
     },
     "omarchy.webp": {
-      "sha256": "721ef3672df4ae79deb25d10b80bb78ad63bca9633ce86582ec870979e13aa9b",
-      "bytes": 79764,
+      "sha256": "4fdf68f7b3eb493b38d7d2d8a767485b6ecc01706fb0d5409183bae2d7a2dcea",
+      "bytes": 80640,
       "width": 1480,
       "height": 980,
       "animated": false,
       "frames": 1
     },
     "omarchy-transparent.webp": {
-      "sha256": "bb6e8696a69d47ea77a4415e66c82e5b9e82ddb52a80bd7ef009e02e920d1693",
-      "bytes": 85438,
+      "sha256": "d426a26c62f5f48f8a8c32eb77bda70b8857f1722f9f975f1a5c15bdb414d563",
+      "bytes": 86668,
       "width": 1480,
       "height": 980,
       "animated": false,
       "frames": 1
     },
     "workflow-tour.webp": {
-      "sha256": "c158149a034436f54cc7f503074e84412f2b9b98ecc034de57c126cdee5b3e72",
-      "bytes": 217026,
+      "sha256": "b61c2519f49cd09cd6aa4bb449c286dba15b6123092cff2b343d5200f6849b06",
+      "bytes": 285500,
       "width": 1480,
       "height": 980,
       "animated": true,
-      "frames": 6
+      "frames": 7
     },
     "workflow-tour.gif": {
-      "sha256": "bbf7f9bf68a272cdb1bcea602b21f4e8619d366cd88974a21e15105260dcf731",
-      "bytes": 768280,
+      "sha256": "1e0a1226166bd2bb271060ca06fac3d80e920d8d175ecd44304a4360ead4d676",
+      "bytes": 785042,
       "width": 1480,
       "height": 980,
       "animated": true,
-      "frames": 6
+      "frames": 7
     },
     "recording-vim.webp": {
-      "sha256": "df7f6716558ab663ed22e0890c5eb84e2ea94235414cea6e901a4f4f956ed9aa",
-      "bytes": 114834,
+      "sha256": "cef77325b5cf8905cd859984b7e22326f39e1cf00c7b750b28dabfdd9945ee50",
+      "bytes": 116900,
       "width": 1480,
       "height": 980,
       "animated": true,
       "frames": 6
     },
     "recording-vim.gif": {
-      "sha256": "27018404dbf62b138c91fe46c412ed386e424042fe1e468d7cbec3bd347df29e",
-      "bytes": 705237,
+      "sha256": "8720e24b43c453926aa8843707f971fad39626c225d2641c3b9aa05e91b8103c",
+      "bytes": 658526,
       "width": 1480,
       "height": 980,
       "animated": true,
       "frames": 6
     },
     "recording-agent.webp": {
-      "sha256": "6bf43822f707d61ea99388713b828cc8827b701d8958e358c1e175a1ca1381bc",
-      "bytes": 122582,
+      "sha256": "13be6047cb2548652b2935a0542c74282ccef420abe07492d44962c1b07d6ab7",
+      "bytes": 124228,
       "width": 1480,
       "height": 980,
       "animated": true,
       "frames": 7
     },
     "recording-agent.gif": {
-      "sha256": "b4ed7f0e63c5d09a942c4ad6d0b2ef5ac9e3178a6712f49b13a4a0b4c12da82b",
-      "bytes": 774684,
+      "sha256": "345028f08af7082f72883cd9fca75315d8d6739798abd7ba51f43fbd79ce27ee",
+      "bytes": 754861,
       "width": 1480,
       "height": 980,
       "animated": true,
       "frames": 7
     },
     "recording-omarchy.webp": {
-      "sha256": "93c59e66b6b535b55c40328f6c620d86764d2ec58ff16a207a995456066c4c5a",
-      "bytes": 345590,
+      "sha256": "0cf55de9e3ffa8cd50d565d857fa8f9a4a48bc39237580eea7afbe5e87a57c29",
+      "bytes": 351178,
       "width": 1480,
       "height": 980,
       "animated": true,
       "frames": 6
     },
     "recording-omarchy.gif": {
-      "sha256": "a46777eead3f16203da0db45594d26ad818c9d94ebfe22ac10278a8e7a7166a9",
-      "bytes": 900940,
+      "sha256": "fd633e09647ab7e31fa5e53e969af5d46b0fffadd3c3acad0e96b99b5efd6e84",
+      "bytes": 891134,
       "width": 1480,
       "height": 980,
       "animated": true,

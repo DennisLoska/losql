@@ -3,6 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openSession, parseConnection } from "./connection";
+import { parseSqliteTableDdl } from "./sqlite-ddl";
 import { QueryError, type Driver } from "./types";
 
 let dir: string;
@@ -417,5 +418,382 @@ describe("a Statement with a NUL character (U+0000) is never run", () => {
     expect(r.affected).toBe(1);
     expect((await driver.run("select count(*) from orders")).rows).toEqual([[4]]);
     expect((await driver.run("select note from orders where id = 2", { readOnly: true })).rows).toEqual([["b"]]);
+  });
+});
+
+describe("describeRelation", () => {
+  test("a composite parent key is described with explicit and implicit foreign keys", async () => {
+    await driver.run("create table parent (a integer not null, b integer not null, c text, primary key (a, b))");
+    await driver.run(`create table child (
+      id integer primary key,
+      p_a integer, p_b integer,
+      i_a integer, i_b integer,
+      dual integer,
+      constraint fk_explicit foreign key (p_b, p_a) references parent(b, a) on delete cascade on update restrict,
+      constraint fk_implicit foreign key (i_a, i_b) references parent,
+      constraint fk_dual_1 foreign key (dual) references parent(a),
+      constraint fk_dual_2 foreign key (dual) references parent(b)
+    )`);
+
+    const details = await driver.describeRelation!({ namespace: "main", name: "child" });
+    expect(details).not.toBeNull();
+    expect(details!.namespace).toBe("main");
+    expect(details!.name).toBe("child");
+    expect(details!.kind).toBe("table");
+
+    const col = (name: string) => details!.columns.find((c) => c.name === name)!;
+
+    // An explicit composite foreign key keeps the declared column order and its actions.
+    expect(col("p_b").references).toHaveLength(1);
+    expect(col("p_b").references[0]).toMatchObject({ relation: "parent", column: "b", onUpdate: "RESTRICT", onDelete: "CASCADE" });
+    expect(col("p_a").references).toHaveLength(1);
+    expect(col("p_a").references[0]).toMatchObject({ relation: "parent", column: "a", onUpdate: "RESTRICT", onDelete: "CASCADE" });
+
+    // An implicit composite foreign key resolves against the parent primary key in order.
+    expect(col("i_a").references).toHaveLength(1);
+    expect(col("i_a").references[0]).toMatchObject({ relation: "parent", column: "a" });
+    expect(col("i_b").references).toHaveLength(1);
+    expect(col("i_b").references[0]).toMatchObject({ relation: "parent", column: "b" });
+
+    // One column may carry several foreign keys.
+    expect(col("dual").references).toHaveLength(2);
+    expect(col("dual").references.map((r) => `${r.relation}.${r.column}`).sort()).toEqual(["parent.a", "parent.b"]);
+
+    const constraints = details!.constraints!;
+    const fk = (name: string) => constraints.find((c) => c.kind === "FOREIGN KEY" && c.name === name)!;
+    expect(fk("fk_explicit").columns).toEqual(["p_b", "p_a"]);
+    expect(fk("fk_explicit").references).toMatchObject({ relation: "parent", columns: ["b", "a"], onDelete: "CASCADE", onUpdate: "RESTRICT" });
+    expect(fk("fk_implicit").columns).toEqual(["i_a", "i_b"]);
+    expect(fk("fk_implicit").references!.columns).toEqual(["a", "b"]);
+
+    expect(constraints.find((c) => c.kind === "PRIMARY KEY")!.columns).toEqual(["id"]);
+
+    const parent = await driver.describeRelation!({ namespace: "main", name: "parent" });
+    const pk = parent!.constraints!.find((c) => c.kind === "PRIMARY KEY")!;
+    expect(pk.columns).toEqual(["a", "b"]);
+  });
+
+  test("an implicit foreign key with mismatched primary key arity leaves the extra target column empty", async () => {
+    await driver.run("create table single_pk (id integer primary key)");
+    await driver.run("create table bad_ref (x integer, y integer, foreign key (x, y) references single_pk)");
+
+    const details = await driver.describeRelation!({ namespace: "main", name: "bad_ref" });
+    const y = details!.columns.find((c) => c.name === "y")!;
+    expect(y.references).toHaveLength(1);
+    expect(y.references[0]!.relation).toBe("single_pk");
+    expect(y.references[0]!.column).toBe("");
+  });
+
+  test("defaults distinguish absent, explicit NULL and values, and generated columns are populated", async () => {
+    await driver.run(`create table defs (
+      no_default text,
+      explicit_null text DEFAULT NULL,
+      zero int DEFAULT 0,
+      status text DEFAULT 'open',
+      gen_v int generated always as (zero * 2) virtual,
+      gen_s int generated always as (zero * 3) stored
+    )`);
+
+    const details = await driver.describeRelation!({ namespace: "main", name: "defs" });
+    const col = (name: string) => details!.columns.find((c) => c.name === name)!;
+    expect(col("no_default").defaultValue).toBeUndefined();
+    expect(col("explicit_null").defaultValue).toBe("NULL");
+    expect(col("zero").defaultValue).toBe("0");
+    expect(col("status").defaultValue).toBe("'open'");
+    expect(col("gen_v").generated).toBeTruthy();
+    expect(col("gen_s").generated).toBeTruthy();
+  });
+
+  test("primary key nullability follows SQLite's rowid and WITHOUT ROWID rules", async () => {
+    await driver.run("create table t_int_pk (id integer primary key, v text)");
+    await driver.run("create table t_int_pk_desc (id integer primary key desc, v text)");
+    await driver.run("create table t_comp_pk (a text, b text, primary key (a, b))");
+    await driver.run("create table t_wo_pk (a text, b text, primary key (a, b)) without rowid");
+
+    const intPk = await driver.describeRelation!({ namespace: "main", name: "t_int_pk" });
+    expect(intPk!.columns[0]).toMatchObject({ name: "id", nullable: false, primaryKeyPosition: 1 });
+
+    // `INTEGER PRIMARY KEY DESC` is not a rowid alias in SQLite, so it stays nullable.
+    const desc = await driver.describeRelation!({ namespace: "main", name: "t_int_pk_desc" });
+    expect(desc!.columns[0]).toMatchObject({ name: "id", nullable: true, primaryKeyPosition: 1 });
+
+    const comp = await driver.describeRelation!({ namespace: "main", name: "t_comp_pk" });
+    expect(comp!.columns.map((c) => [c.name, c.nullable, c.primaryKeyPosition])).toEqual([
+      ["a", true, 1],
+      ["b", true, 2],
+    ]);
+
+    const wo = await driver.describeRelation!({ namespace: "main", name: "t_wo_pk" });
+    expect(wo!.columns.map((c) => [c.name, c.nullable])).toEqual([["a", false], ["b", false]]);
+  });
+
+  test("checks, a named unique constraint and a partial expression index are kept apart", async () => {
+    await driver.run(`create table checks_t (
+      id integer primary key,
+      amount integer constraint ck_amount check (amount > 0),
+      status text,
+      code text,
+      active integer default 1,
+      constraint ck_table_balance check (length(code) < 10),
+      constraint uq_code unique (code),
+      check (status in ('a,b', 'c') and (amount > 0))
+    )`);
+    await driver.run("create unique index idx_lower_code on checks_t(lower(code)) where active = 1");
+
+    const details = await driver.describeRelation!({ namespace: "main", name: "checks_t" });
+    const constraints = details!.constraints!;
+
+    const checks = constraints.filter((c) => c.kind === "CHECK");
+    expect(checks).toHaveLength(3);
+    const check = (name: string) => checks.find((c) => c.name === name)!;
+    expect(check("ck_amount").definition).toMatch(/amount\s*>\s*0/);
+    expect(check("ck_table_balance").definition).toMatch(/length\s*\(\s*code\s*\)\s*<\s*10/);
+    const unnamed = checks.find((c) => c.name === undefined)!;
+    expect(unnamed).toBeDefined();
+    expect(unnamed.definition).toContain("'a,b'");
+    expect(unnamed.definition).toMatch(/\(amount\s*>\s*0\)/);
+
+    // The named table-level UNIQUE is a constraint; the standalone CREATE UNIQUE INDEX is not.
+    const uniques = constraints.filter((c) => c.kind === "UNIQUE");
+    expect(uniques).toHaveLength(1);
+    expect(uniques[0]).toMatchObject({ name: "uq_code", columns: ["code"] });
+    expect(uniques.map((u) => u.name)).not.toContain("idx_lower_code");
+
+    const indexes = details!.indexes!;
+    const idx = indexes.find((i) => i.name === "idx_lower_code")!;
+    expect(idx).toBeDefined();
+    expect(idx.unique).toBe(true);
+    expect(idx.primary).toBe(false);
+    expect(idx.columns[0]).toMatch(/lower\s*\(\s*code\s*\)/);
+    expect(idx.predicate).toMatch(/active\s*=\s*1/);
+  });
+
+  test("quoted identifiers are described by their real names", async () => {
+    await driver.run('create table "weird ""table""" ("odd ""col""" text)');
+
+    const details = await driver.describeRelation!({ namespace: "main", name: 'weird "table"' });
+    expect(details).not.toBeNull();
+    expect(details!.name).toBe('weird "table"');
+    expect(details!.columns.map((c) => c.name)).toEqual(['odd "col"']);
+  });
+
+  test("a temp relation is described from the temp namespace", async () => {
+    await driver.run("create temp table tmp_thing (id integer)");
+
+    const details = await driver.describeRelation!({ namespace: "temp", name: "tmp_thing" });
+    expect(details).not.toBeNull();
+    expect(details!.namespace).toBe("temp");
+    expect(details!.name).toBe("tmp_thing");
+    expect(details!.columns.map((c) => c.name)).toEqual(["id"]);
+  });
+
+  test("a view is described with its stored SQL", async () => {
+    await driver.run("create view adults as select name from people where age >= 18");
+
+    const details = await driver.describeRelation!({ namespace: "main", name: "adults" });
+    expect(details!.kind).toBe("view");
+    expect(details!.definition).toMatch(/create\s+view\s+adults/i);
+    expect(details!.columns.map((c) => c.name)).toEqual(["name"]);
+  });
+
+  test("a missing relation or an absent namespace is null", async () => {
+    expect(await driver.describeRelation!({ namespace: "main", name: "does_not_exist" })).toBeNull();
+    expect(await driver.describeRelation!({ namespace: "other", name: "people" })).toBeNull();
+  });
+
+  test("named foreign keys on the same columns and target are told apart by their actions", async () => {
+    await driver.run("create table parent2 (a integer primary key)");
+    await driver.run(`create table twin_fk (
+      x integer,
+      constraint fk_del foreign key (x) references parent2(a) on delete cascade,
+      constraint fk_upd foreign key (x) references parent2(a) on update restrict
+    )`);
+
+    const details = await driver.describeRelation!({ namespace: "main", name: "twin_fk" });
+    const fks = details!.constraints!.filter((c) => c.kind === "FOREIGN KEY");
+    expect(fks).toHaveLength(2);
+    const byName = (name: string) => fks.find((c) => c.name === name)!;
+    expect(byName("fk_del").references).toMatchObject({ onDelete: "CASCADE", onUpdate: "NO ACTION" });
+    expect(byName("fk_upd").references).toMatchObject({ onDelete: "NO ACTION", onUpdate: "RESTRICT" });
+    const x = details!.columns.find((c) => c.name === "x")!;
+    expect(x.references.map((r) => r.constraintName).sort()).toEqual(["fk_del", "fk_upd"]);
+  });
+
+  test("an implicit foreign key to a broken view leaves the target column empty", async () => {
+    await driver.run("create table gone (id integer primary key)");
+    await driver.run("create view broken_v as select * from gone");
+    await driver.run("drop table gone");
+    await driver.run("create table to_view (x integer references broken_v)");
+
+    const details = await driver.describeRelation!({ namespace: "main", name: "to_view" });
+    const x = details!.columns.find((c) => c.name === "x")!;
+    expect(x.references).toHaveLength(1);
+    expect(x.references[0]).toMatchObject({ relation: "broken_v", column: "" });
+  });
+
+  test("identifiers differing only by non-ASCII case stay distinct", async () => {
+    await driver.run(`create table uni (
+      "À" integer references teams(id),
+      "à" integer,
+      "É" int generated always as (1) virtual,
+      "é" int generated always as (2) virtual
+    )`);
+
+    const details = await driver.describeRelation!({ namespace: "main", name: "uni" });
+    const col = (name: string) => details!.columns.find((c) => c.name === name)!;
+    expect(col("À").references).toHaveLength(1);
+    expect(col("à").references).toEqual([]);
+    expect(col("É").generated).toBe("1");
+    expect(col("é").generated).toBe("2");
+
+    await driver.run("attach ':memory:' as \"Ä\"");
+    await driver.run('create table "Ä".only_upper (id integer)');
+    expect(await driver.describeRelation!({ namespace: "ä", name: "only_upper" })).toBeNull();
+    expect(await driver.describeRelation!({ namespace: "Ä", name: "only_upper" })).not.toBeNull();
+  });
+
+  test("a block comment ends at its first */ and later checks are still read", async () => {
+    await driver.run("create table cm (a int /* /* */, b int check (b < 5), check (a > 0))");
+
+    const details = await driver.describeRelation!({ namespace: "main", name: "cm" });
+    const checks = details!.constraints!.filter((c) => c.kind === "CHECK");
+    expect(checks.map((c) => c.definition)).toEqual(["b < 5", "a > 0"]);
+  });
+
+  test("virtual table module arguments are not read as table constraints", async () => {
+    await driver.run("create virtual table vt_fts using fts3(body, check (body > 0))");
+
+    const details = await driver.describeRelation!({ namespace: "main", name: "vt_fts" });
+    expect(details).not.toBeNull();
+    expect(details!.constraints!.filter((c) => c.kind === "CHECK")).toEqual([]);
+  });
+
+  test("index terms keep operands named asc or desc and collations inside expressions", async () => {
+    await driver.run("create table ix_t (x int, desc int)");
+    await driver.run("create index ix_plus on ix_t(x + desc)");
+    await driver.run("create index ix_concat on ix_t(x || desc collate nocase desc)");
+    await driver.run("create index ix_call on ix_t(lower(x) collate nocase desc)");
+
+    const details = await driver.describeRelation!({ namespace: "main", name: "ix_t" });
+    const idx = (name: string) => details!.indexes!.find((i) => i.name === name)!;
+    expect(idx("ix_plus").columns).toEqual(["x + desc"]);
+    expect(idx("ix_concat").columns).toEqual(["x || desc collate nocase"]);
+    expect(idx("ix_call").columns).toEqual(["lower(x)"]);
+  });
+
+  test("an inline foreign key to a table named like a constraint word keeps its name and actions", async () => {
+    await driver.run('create table "generated" (id integer primary key)');
+    await driver.run(`create table gen_ref (
+      a integer constraint fk_a references generated(id) match simple on delete cascade,
+      b integer constraint fk_b references generated on update restrict not null
+    )`);
+
+    const details = await driver.describeRelation!({ namespace: "main", name: "gen_ref" });
+    const fks = details!.constraints!.filter((c) => c.kind === "FOREIGN KEY");
+    const byName = (name: string) => fks.find((c) => c.name === name);
+    expect(byName("fk_a")?.columns).toEqual(["a"]);
+    expect(byName("fk_a")?.references).toMatchObject({ relation: "generated", onDelete: "CASCADE" });
+    expect(byName("fk_b")?.columns).toEqual(["b"]);
+    expect(byName("fk_b")?.references).toMatchObject({ relation: "generated", onUpdate: "RESTRICT" });
+    expect(details!.columns.find((c) => c.name === "b")!.nullable).toBe(false);
+  });
+
+  test("index terms drop sort orders after postfix null tests and keyword-named operands", async () => {
+    await driver.run("create table ix_n (x int, glob int)");
+    await driver.run("create index ix_isnull on ix_n(x isnull desc)");
+    await driver.run("create index ix_notnull on ix_n(x NOTNULL ASC)");
+    await driver.run("create index ix_not_null on ix_n(x not null desc)");
+    await driver.run("create index ix_plus_glob on ix_n(x + glob desc)");
+    await driver.run("create index ix_glob_glob on ix_n(x glob glob desc)");
+
+    const details = await driver.describeRelation!({ namespace: "main", name: "ix_n" });
+    const idx = (name: string) => details!.indexes!.find((i) => i.name === name)!;
+    expect(idx("ix_isnull").columns).toEqual(["x isnull"]);
+    expect(idx("ix_notnull").columns).toEqual(["x NOTNULL"]);
+    expect(idx("ix_not_null").columns).toEqual(["x not null"]);
+    expect(idx("ix_plus_glob").columns).toEqual(["x + glob"]);
+    expect(idx("ix_glob_glob").columns).toEqual(["x glob glob"]);
+  });
+
+  test("index terms drop only a collation that applies to the whole term", async () => {
+    await driver.run("create table ix_c (x text, desc text)");
+    await driver.run("create index ix_not on ix_c(not x collate nocase)");
+    await driver.run("create index ix_paren on ix_c((x + desc) collate nocase)");
+    await driver.run("create index ix_neg on ix_c(-x collate nocase desc)");
+    await driver.run("create index ix_paren_op on ix_c((x) || desc collate nocase)");
+
+    const details = await driver.describeRelation!({ namespace: "main", name: "ix_c" });
+    const idx = (name: string) => details!.indexes!.find((i) => i.name === name)!;
+    expect(idx("ix_not").columns).toEqual(["not x collate nocase"]);
+    expect(idx("ix_paren").columns).toEqual(["(x + desc)"]);
+    expect(idx("ix_neg").columns).toEqual(["-x"]);
+    expect(idx("ix_paren_op").columns).toEqual(["(x) || desc collate nocase"]);
+  });
+
+  test("table constraints written without commas between them are each read", async () => {
+    await driver.run("create table adj_p (id integer primary key)");
+    await driver.run(`create table adj (
+      a int, b int, x int,
+      constraint c1 check (a > 0) constraint c2 check (b > 0) check (x <> 0),
+      constraint fk_del foreign key (a) references adj_p(id) on delete cascade constraint fk_upd foreign key (b) references adj_p(id) on update restrict
+    )`);
+
+    const details = await driver.describeRelation!({ namespace: "main", name: "adj" });
+    const checks = details!.constraints!.filter((c) => c.kind === "CHECK");
+    expect(checks.map((c) => [c.name, c.definition])).toEqual([
+      ["c1", "a > 0"],
+      ["c2", "b > 0"],
+      [undefined, "x <> 0"],
+    ]);
+    const fks = details!.constraints!.filter((c) => c.kind === "FOREIGN KEY");
+    const byName = (name: string) => fks.find((c) => c.name === name);
+    expect(byName("fk_del")?.columns).toEqual(["a"]);
+    expect(byName("fk_del")?.references).toMatchObject({ onDelete: "CASCADE", onUpdate: "NO ACTION" });
+    expect(byName("fk_upd")?.columns).toEqual(["b"]);
+    expect(byName("fk_upd")?.references).toMatchObject({ onDelete: "NO ACTION", onUpdate: "RESTRICT" });
+  });
+
+  test("a byte order mark (U+FEFF) between tokens is whitespace", async () => {
+    const bom = "﻿";
+    await driver.run(
+      `create table bom_t (${bom}a int, b int generated always as (${bom}a +${bom}(1)${bom}) virtual, check (${bom}a > 0)${bom})`,
+    );
+
+    const details = await driver.describeRelation!({ namespace: "main", name: "bom_t" });
+    expect(details!.columns.map((c) => c.name)).toEqual(["a", "b"]);
+    expect(details!.columns.find((c) => c.name === "b")!.generated).toBe("a +\uFEFF(1)");
+    expect(details!.constraints!.filter((c) => c.kind === "CHECK").map((c) => c.definition)).toEqual(["a > 0"]);
+  });
+
+  test("a table with many bracket-quoted columns and block comments is described", async () => {
+    const n = 1900;
+    const cols = Array.from({ length: n }, (_, i) => `[c ${i}] int /* col ${i} */`).join(", ");
+    await driver.run(`create table wide (${cols}, [g] int generated always as ([c 0] + [c ${n - 1}]) virtual, check ([c 1] > 0))`);
+
+    const details = await driver.describeRelation!({ namespace: "main", name: "wide" });
+    expect(details!.columns).toHaveLength(n + 1);
+    expect(details!.columns.find((c) => c.name === "g")!.generated).toBe(`[c 0] + [c ${n - 1}]`);
+    expect(details!.constraints!.filter((c) => c.kind === "CHECK").map((c) => c.definition)).toEqual(["[c 1] > 0"]);
+  });
+
+  test("stored table text is read in linear time", () => {
+    const n = 10000;
+    const cols = Array.from({ length: n }, (_, i) => `[c ${i}] int /* col ${i} */`).join(", ");
+    const started = performance.now();
+    const parsed = parseSqliteTableDdl(`create table wide (${cols}, [g] int as ([c 0] + [c ${n - 1}]))`);
+    const elapsed = performance.now() - started;
+    expect(parsed.generated.get("g")).toBe(`[c 0] + [c ${n - 1}]`);
+    expect(elapsed).toBeLessThan(1000);
+  });
+
+  test("an already aborted signal rejects with a cancellation error", async () => {
+    const controller = new AbortController();
+    controller.abort();
+
+    const err = await driver
+      .describeRelation!({ namespace: "main", name: "people" }, { signal: controller.signal })
+      .then(() => null, (e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toMatch(/cancel|abort/i);
   });
 });

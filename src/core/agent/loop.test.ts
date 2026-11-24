@@ -1,10 +1,12 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { DEFAULT_CONFIG } from "../config";
 import { openSession, parseConnection } from "../db/connection";
-import type { Driver } from "../db/types";
-import { runAgent, type AgentEvent, type Turn } from "./loop";
+import type { Cell, Driver, RelationDetails, RelationRef, Result } from "../db/types";
+import { runAgent, sanitizeAgentError, type AgentEvent, type Turn } from "./loop";
 import {
   AGENT_QUERY_TIMEOUT_MS,
+  MAX_AGENT_CELL,
+  MAX_AGENT_ERROR,
   MAX_AGENT_ROWS,
   MAX_PROMPT_BYTES,
   SYSTEM_PROMPT,
@@ -46,7 +48,8 @@ describe("runAgent", () => {
       sql: "select count(*) from orders",
       steps: [{
         action: { action: "query", sql: "select count(*) as n from orders", why: "count them" },
-        result: '{"columns":["n"],"rows":[[12]],"truncated":false}',
+        result:
+          '{"statement":"select count(*) as n from orders","columns":["n"],"rows":[[12]],"truncated":false}',
       }],
     });
     expect(events.map((e) => e.type)).toEqual(["thinking", "step", "thinking", "answer"]);
@@ -56,7 +59,9 @@ describe("runAgent", () => {
     expect(prompts[0]).toContain('<database dialect="sqlite" name="demo">');
     expect(prompts[0]).toContain("orders(id integer pk, customer_id integer -> customers.id, status text, ordered_at text)");
     expect(prompts[1]).toContain('{"action":"query","sql":"select count(*) as n from orders","why":"count them"}');
-    expect(prompts[1]).toContain('<result>{"columns":["n"],"rows":[[12]],"truncated":false}</result>');
+    expect(prompts[1]).toContain(
+      '<result>{"statement":"select count(*) as n from orders","columns":["n"],"rows":[[12]],"truncated":false}</result>',
+    );
   });
 
   test("a write in a query step fails at the database and changes nothing", async () => {
@@ -66,9 +71,12 @@ describe("runAgent", () => {
     ]);
     const outcome = await runAgent({ intent: "ask", text: "wipe customers", conversation: [] }, { ask, driver, config }, () => {});
     expect(outcome.ok).toBe(true);
-    expect(JSON.parse(outcome.steps[0]!.result)).toEqual({ error: expect.stringContaining("read") });
+    expect(JSON.parse(outcome.steps[0]!.result)).toEqual({
+      statement: "delete from customers",
+      error: expect.stringContaining("read"),
+    });
     expect(await count("customers")).toBe(8);
-    expect(prompts[1]).toContain('<result>{"error":');
+    expect(prompts[1]).toContain('<result>{"statement":"delete from customers","error":');
   });
 
   test("more than one statement in a query step is refused without touching the database", async () => {
@@ -85,7 +93,7 @@ describe("runAgent", () => {
     const result = JSON.parse(outcome.steps[0]!.result);
     expect(result.rows.length).toBe(50);
     expect(result.truncated).toBe(true);
-    expect(result.rows[0][1].length).toBe(201);
+    expect(result.rows[0][1].length).toBe(MAX_AGENT_CELL);
     expect(result.rows[0][1].endsWith("…")).toBe(true);
   });
 
@@ -257,7 +265,7 @@ describe("runAgent", () => {
     expect(parsedErr).not.toContain("hunter2");
     expect(parsedErr).not.toContain("bob");
     expect(parsedErr).toContain("postgres://***@db.example/x");
-    expect(parsedErr.length).toBe(301);
+    expect(parsedErr.length).toBe(MAX_AGENT_ERROR);
     expect(parsedErr.endsWith("…")).toBe(true);
     expect(prompts[1]).not.toContain("hunter2");
   });
@@ -312,7 +320,7 @@ describe("runAgent", () => {
       expect(outcome.kind).toBe("other");
       expect(outcome.message).not.toContain("secret");
       expect(outcome.message).toContain("postgres://***@host/db");
-      expect(outcome.message.length).toBe(301);
+      expect(outcome.message.length).toBe(MAX_AGENT_ERROR);
       expect(outcome.message.endsWith("…")).toBe(true);
     }
     expect(events.length).toBe(1);
@@ -474,7 +482,7 @@ describe("runAgent", () => {
       steps: [
         {
           action: { action: "query", sql: "select 1" },
-          result: '{"columns":["1"],"rows":[[1]],"truncated":false}',
+          result: '{"statement":"select 1","columns":["1"],"rows":[[1]],"truncated":false}',
         },
       ],
     });
@@ -607,7 +615,7 @@ describe("runAgent", () => {
     const lastPrompt = prompts[2]!;
     expect(lastPrompt).toContain(`"columns":["${"c".repeat(63)}…"]`);
     expect(lastPrompt).toContain(`"rows":[["${"v".repeat(199)}…"]]`);
-    expect(lastPrompt).toContain(`{"error":"${"e".repeat(299)}…"}`);
+    expect(lastPrompt).toContain(`"error":"${"e".repeat(299)}…"`);
   });
 });
 
@@ -863,7 +871,7 @@ describe("workspace tools and explain step in runAgent", () => {
         return driver.run(...a);
       },
     };
-    const { ask } = scripted([
+    const { ask, prompts } = scripted([
       '{"action":"explain","sql":"select * from orders"}',
       '{"action":"read_results"}',
       '{"action":"read_buffer"}',
@@ -886,6 +894,8 @@ describe("workspace tools and explain step in runAgent", () => {
     expect(outcome.ok).toBe(true);
     expect(ran).toBe(0);
     expect(resultsRead).toBe(0);
+    expect(prompts[0]).toContain('{"action":"read_buffer"');
+    expect(prompts[0]).not.toContain("read_results");
     expect(JSON.parse(outcome.steps[0]!.result).error).toContain('agent.dataAccess is "schema"');
     expect(JSON.parse(outcome.steps[1]!.result).error).toContain('agent.dataAccess is "schema"');
     expect(JSON.parse(outcome.steps[2]!.result)).toEqual({
@@ -964,6 +974,290 @@ describe("workspace tools and explain step in runAgent", () => {
     } finally {
       await pg.close();
     }
+  });
+});
+
+const richOrdersDetails: RelationDetails = {
+  namespace: "main",
+  name: "orders",
+  kind: "table",
+  columns: [
+    { name: "id", type: "integer", nullable: false, primaryKeyPosition: 1, references: [] },
+    {
+      name: "customer_id",
+      type: "integer",
+      nullable: false,
+      defaultValue: "0",
+      references: [{ relation: "customers", column: "id", onDelete: "CASCADE" }],
+    },
+    { name: "status", type: "text", nullable: false, defaultValue: "'new'", references: [] },
+    { name: "total", type: "real", nullable: false, generated: "quantity * unit_price", references: [] },
+  ],
+  indexes: [
+    { name: "orders_pkey", unique: false, primary: true, columns: ["id"], method: "btree" },
+    {
+      name: "orders_status_idx",
+      unique: false,
+      primary: false,
+      columns: ["status"],
+      method: "btree",
+      predicate: "status = 'paid'",
+    },
+  ],
+  constraints: [
+    { name: "orders_pkey", kind: "PRIMARY KEY", columns: ["id"] },
+    { name: "orders_customer_key", kind: "UNIQUE", columns: ["customer_id"] },
+    {
+      name: "orders_customer_fkey",
+      kind: "FOREIGN KEY",
+      columns: ["customer_id"],
+      definition: "FOREIGN KEY (customer_id) REFERENCES customers(id) ON DELETE CASCADE",
+    },
+  ],
+};
+
+type DescribeStub = NonNullable<Driver["describeRelation"]>;
+
+describe("describe steps use the Driver's rich Relation details", () => {
+  test("loads enriched details, forwards the signal, falls back to the snapshot on null, and survives a Driver error", async () => {
+    const seen: { ref: RelationRef; signal?: AbortSignal }[] = [];
+    const describeRelation: DescribeStub = async (ref, options) => {
+      seen.push({ ref, signal: options?.signal });
+      if (ref.name === "orders") return richOrdersDetails;
+      if (ref.name === "customers") return null;
+      throw new Error(
+        `describeRelation failed at postgres://bob:hunter2@db.example/prod: ${"x".repeat(400)}`,
+      );
+    };
+    const richDriver: Pick<Driver, "run" | "schema" | "connection"> & { describeRelation: DescribeStub } = {
+      connection: driver.connection,
+      schema: () => driver.schema(),
+      run: (...a: Parameters<Driver["run"]>) => driver.run(...a),
+      describeRelation,
+    };
+
+    const controller = new AbortController();
+    const first = scripted([
+      '{"action":"describe","relations":["orders","customers"]}',
+      '{"action":"answer","message":"described"}',
+    ]);
+    const firstOutcome = await runAgent(
+      { intent: "ask", text: "describe the orders tables", conversation: [] },
+      { ask: first.ask, driver: richDriver, config, signal: controller.signal },
+      () => {},
+    );
+
+    expect(firstOutcome.ok).toBe(true);
+    expect(seen.map((entry) => entry.ref)).toEqual([
+      { namespace: "main", name: "orders" },
+      { namespace: "main", name: "customers" },
+    ]);
+    expect(seen.every((entry) => entry.signal === controller.signal)).toBe(true);
+
+    const text = firstOutcome.steps[0]!.result;
+    const fragments = [
+      "orders (table)",
+      "  id integer not null primary key",
+      "  customer_id integer not null default 0 references customers.id",
+      "  status text not null default 'new'",
+      "  total real not null generated quantity * unit_price",
+      "indexes:",
+      "  orders_pkey primary (id) btree",
+      "  orders_status_idx (status) btree where status = 'paid'",
+      "constraints:",
+      "  orders_pkey PRIMARY KEY (id)",
+      "  orders_customer_key UNIQUE (customer_id)",
+      "  orders_customer_fkey FOREIGN KEY (customer_id): FOREIGN KEY (customer_id) REFERENCES customers(id) ON DELETE CASCADE",
+    ];
+    const positions = fragments.map((fragment) => text.indexOf(fragment));
+    expect(positions.every((position) => position >= 0)).toBe(true);
+    expect([...positions].sort((a, b) => a - b)).toEqual(positions);
+
+    // The second Relation returned null, so its Snapshot columns are shown instead
+    expect(text).toContain("customers (table)");
+    expect(text).toContain("  created_at text not null");
+
+    const second = scripted([
+      '{"action":"describe","relations":["products"]}',
+      '{"action":"answer","message":"still here"}',
+    ]);
+    const events: AgentEvent[] = [];
+    const secondOutcome = await runAgent(
+      { intent: "ask", text: "describe products", conversation: [] },
+      { ask: second.ask, driver: richDriver, config },
+      (e) => events.push(e),
+    );
+
+    expect(secondOutcome).toMatchObject({ ok: true, message: "still here" });
+    expect(second.prompts.length).toBe(2);
+    expect(secondOutcome.steps.length).toBe(1);
+    const failedPayload = JSON.parse(secondOutcome.steps[0]!.result) as { error?: string };
+    expect(typeof failedPayload.error).toBe("string");
+    expect(failedPayload.error).not.toContain("hunter2");
+    expect(failedPayload.error).not.toContain("bob");
+    expect(failedPayload.error).toContain("postgres://***@db.example/prod");
+    expect(second.prompts[1]).toContain("postgres://***@db.example/prod");
+    expect(second.prompts[1]).not.toContain("hunter2");
+    const stepEvents = events.filter((e) => e.type === "step");
+    expect(stepEvents.length).toBe(1);
+    expect(JSON.parse((stepEvents[0] as { step: { result: string } }).step.result).error).toBe(
+      failedPayload.error,
+    );
+  });
+});
+
+describe("bounded query Step payloads", () => {
+  const makeResult = (columns: string[], rows: Cell[][], truncated = false): Result => ({
+    columns: columns.map((name) => ({ name, type: "text" })),
+    rows,
+    truncated,
+    affected: null,
+    command: "SELECT",
+    durationMs: 1,
+  });
+
+  const payloadFor = async (result: Result): Promise<{ [key: string]: unknown }> => {
+    const stub: Pick<Driver, "run" | "schema" | "connection"> = {
+      connection: driver.connection,
+      schema: () => driver.schema(),
+      run: async () => result,
+    };
+    const { ask } = scripted(['{"action":"query","sql":"select 1"}', '{"action":"answer","message":"ok"}']);
+    const outcome = await runAgent(
+      { intent: "ask", text: "x", conversation: [] },
+      { ask, driver: stub, config },
+      () => {},
+    );
+    return JSON.parse(outcome.steps[0]!.result);
+  };
+
+  test("query Step payloads carry the executed Statement in successes and in execution errors", async () => {
+    const { ask } = scripted([
+      '{"action":"query","sql":"select count(*) as n from orders"}',
+      '{"action":"query","sql":"select nope from orders"}',
+      '{"action":"query","sql":"select 1; select 2"}',
+      '{"action":"answer","message":"done"}',
+    ]);
+    const outcome = await runAgent(
+      { intent: "ask", text: "x", conversation: [] },
+      { ask, driver, config },
+      () => {},
+    );
+
+    const ok = JSON.parse(outcome.steps[0]!.result);
+    expect(ok.statement).toBe("select count(*) as n from orders");
+    expect(ok.rows).toEqual([[12]]);
+
+    const failed = JSON.parse(outcome.steps[1]!.result);
+    expect(failed.statement).toBe("select nope from orders");
+    expect(failed.error).toContain("no such column");
+
+    expect(outcome.steps[2]!.result).toBe('{"error":"send exactly one statement per query"}');
+  });
+
+  test("marks a Result truncated when columns alone are omitted", async () => {
+    const payload = await payloadFor(
+      makeResult(
+        Array.from({ length: 41 }, (_, i) => `c${i}`),
+        [Array.from({ length: 41 }, (_, i) => `v${i}`)],
+      ),
+    );
+    expect((payload.columns as string[]).length).toBe(40);
+    expect(payload.columnsOmitted).toBe(1);
+    expect(payload.truncated).toBe(true);
+  });
+
+  test("marks a Result truncated when an included string or serialized JSON cell is cut", async () => {
+    const longString = await payloadFor(makeResult(["s"], [["x".repeat(MAX_AGENT_CELL + 1)]]));
+    const stringCell = (longString.rows as string[][])[0]![0]!;
+    expect(stringCell.length).toBe(MAX_AGENT_CELL);
+    expect(stringCell.endsWith("…")).toBe(true);
+    expect(longString.truncated).toBe(true);
+
+    const longJson = await payloadFor(
+      makeResult(["j"], [[{ a: "b".repeat(MAX_AGENT_CELL + 100) } as Cell]]),
+    );
+    const jsonCell = (longJson.rows as string[][])[0]![0]!;
+    expect(typeof jsonCell).toBe("string");
+    expect(jsonCell.endsWith("…")).toBe(true);
+    expect(longJson.truncated).toBe(true);
+  });
+
+  test("marks a Result truncated when rows are omitted or the Driver says so", async () => {
+    const manyRows = await payloadFor(
+      makeResult(
+        ["n"],
+        Array.from({ length: MAX_AGENT_ROWS + 1 }, (_, i) => [i]),
+      ),
+    );
+    expect((manyRows.rows as number[][]).length).toBe(MAX_AGENT_ROWS);
+    expect(manyRows.truncated).toBe(true);
+
+    const driverSays = await payloadFor(makeResult(["n"], [[1]], true));
+    expect(driverSays.truncated).toBe(true);
+  });
+
+  test("keeps a cell at the exact code-point cap whole, including astral characters", async () => {
+    const ascii = "y".repeat(MAX_AGENT_CELL);
+    const asciiPayload = await payloadFor(makeResult(["s"], [[ascii]]));
+    expect((asciiPayload.rows as string[][])[0]![0]).toBe(ascii);
+    expect(asciiPayload.truncated).toBe(false);
+
+    const astral = `${"z".repeat(MAX_AGENT_CELL - 1)}😀`;
+    expect([...astral].length).toBe(MAX_AGENT_CELL);
+    const astralPayload = await payloadFor(makeResult(["s"], [[astral]]));
+    expect((astralPayload.rows as string[][])[0]![0]).toBe(astral);
+    expect(astralPayload.truncated).toBe(false);
+
+    const allAstral = "😀".repeat(MAX_AGENT_CELL);
+    const allAstralPayload = await payloadFor(makeResult(["s"], [[allAstral]]));
+    expect((allAstralPayload.rows as string[][])[0]![0]).toBe(allAstral);
+    expect(allAstralPayload.truncated).toBe(false);
+  });
+
+  test("a Driver error payload carries the Statement and stays bounded with astral text", async () => {
+    const stub: Pick<Driver, "run" | "schema" | "connection"> = {
+      connection: driver.connection,
+      schema: () => driver.schema(),
+      run: async () => {
+        throw new Error(`postgres://bob:hunter2@db.example/prod ${"😀".repeat(600)}`);
+      },
+    };
+    const { ask } = scripted(['{"action":"query","sql":"select 1"}', '{"action":"answer","message":"ok"}']);
+    const outcome = await runAgent(
+      { intent: "ask", text: "x", conversation: [] },
+      { ask, driver: stub, config },
+      () => {},
+    );
+    const payload = JSON.parse(outcome.steps[0]!.result) as { statement: string; error: string };
+    expect(payload.statement).toBe("select 1");
+    expect([...payload.error].length).toBeLessThanOrEqual(MAX_AGENT_ERROR);
+    expect(payload.error.endsWith("…")).toBe(true);
+    expect(payload.error).not.toContain("hunter2");
+    expect(payload.error).not.toContain("bob");
+  });
+
+  test("sanitizeAgentError stays within MAX_AGENT_ERROR code points and never leaks credentials", () => {
+    const codePoints = (text: string) => [...text].length;
+    const cases = [
+      "a".repeat(MAX_AGENT_ERROR * 3),
+      "😀".repeat(MAX_AGENT_ERROR + 1),
+      `boom postgres://bob:hunter2@db.example/prod ${"a".repeat(MAX_AGENT_ERROR * 2)}`,
+      `boom postgres://bob:hunter2@db.example/prod ${"😀".repeat(MAX_AGENT_ERROR)}`,
+    ];
+    for (const message of cases) {
+      const out = sanitizeAgentError(message);
+      expect(codePoints(out)).toBeLessThanOrEqual(MAX_AGENT_ERROR);
+      expect(out.endsWith("…")).toBe(true);
+      expect(out).not.toContain("hunter2");
+      expect(out).not.toContain("bob");
+    }
+
+    expect(sanitizeAgentError("q".repeat(MAX_AGENT_ERROR))).toBe("q".repeat(MAX_AGENT_ERROR));
+    expect(sanitizeAgentError("q".repeat(MAX_AGENT_ERROR + 1))).toBe(
+      `${"q".repeat(MAX_AGENT_ERROR - 1)}…`,
+    );
+    expect(sanitizeAgentError('near "frm": syntax error')).toBe('near "frm": syntax error');
   });
 });
 

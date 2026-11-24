@@ -25,6 +25,7 @@ export function Workspace(props: {
   const focus = useFocus();
 
   let editorApi: EditorApi | undefined;
+  let resultsApi: ResultsApi | undefined;
 
   const schemaOverlay = createMemo(() => focus.layout().schema === "overlay");
   const agentOverlay = createMemo(() => focus.layout().agent === "overlay");
@@ -65,6 +66,9 @@ export function Workspace(props: {
             onInsert={(text) => {
               editorApi?.insert(text);
             }}
+            onInspect={(ref) => {
+              resultsApi?.inspect(ref);
+            }}
           />
         </box>
 
@@ -79,7 +83,12 @@ export function Workspace(props: {
             />
           </box>
           <box height={focus.zoomed() ? "100%" : "40%"} width="100%" flexShrink={0}>
-            <ResultsPane expose={props.exposeResults} />
+            <ResultsPane
+              expose={(api) => {
+                resultsApi = api;
+                props.exposeResults?.(api);
+              }}
+            />
           </box>
         </box>
 

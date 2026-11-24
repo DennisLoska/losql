@@ -267,7 +267,7 @@ describe("Fix 4: Running a Command does not subscribe the caller to the registry
 });
 
 describe("Fix 6: The key menu fits its terminal", () => {
-  test("41 top-level entries at 100 by 20 show … on long titles and a … N more line", async () => {
+  test("41 top-level entries at 100 by 20 show … on long titles and a page footer", async () => {
     app = await mount({ width: 100, height: 20 });
     const keys = "0123456789abcdABCDfghijklmnopqrstuvwxyz"; // 39 keys + 2 existing ("?" and "e") = 41 top-level entries
     for (let i = 0; i < keys.length; i++) {
@@ -291,8 +291,8 @@ describe("Fix 6: The key menu fits its terminal", () => {
     expect(frame).toContain("…");
     expect(frame).not.toContain("exceeds the column width");
 
-    // Last visible cell row of the panel ends with … N more
-    expect(frame).toMatch(/… \d+ more/);
+    // The entries that do not fit are on further pages, named by the footer
+    expect(frame).toMatch(/page 1\/\d+ · PgUp\/PgDn/);
 
     // Panel never takes more than terminal height - 2 rows (18 rows)
     const statusLine = lines[19]!;

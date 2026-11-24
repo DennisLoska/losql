@@ -13,7 +13,7 @@
   <img src="https://img.shields.io/badge/SQLite-003B57?style=flat-square&logo=sqlite&logoColor=white" alt="SQLite" />
   <img src="https://img.shields.io/badge/Postgres-336791?style=flat-square&logo=postgresql&logoColor=white" alt="Postgres" />
   <img src="https://img.shields.io/badge/agent-Claude%20Code%20%7C%20Codex%20%7C%20OpenCode%20%7C%20Antigravity-bb9af7?style=flat-square" alt="Agent: Claude Code, Codex, OpenCode, Antigravity" />
-  <img src="https://img.shields.io/badge/version-0.2.0-9ece6a?style=flat-square" alt="version 0.2.0" />
+  <img src="https://img.shields.io/badge/version-0.3.0-9ece6a?style=flat-square" alt="version 0.3.0" />
 </p>
 
 <p align="center">
@@ -58,7 +58,7 @@ Modal editing with motions, operators, text objects, registers, undo and search.
 
 **Agent: asks the database before it answers**
 
-The agent can look at the schema and run read-only queries, step by step, and then proposes a statement. A proposal never runs by itself: `Enter` puts it into the editor, `r` runs it.
+The agent can look at the schema and run read-only queries, step by step, and then proposes a statement. The conversation reads like a chat: your question, the agent's steps and answer, and a proposal card. A proposal never runs by itself: `Enter` puts it into the editor, `r` runs it.
 
 <img src="readme/agent.webp" alt="The agent pane with a question, a query step and a proposal card" width="100%" />
 
@@ -92,6 +92,17 @@ The agent can look at the schema and run read-only queries, step by step, and th
 `space z` gives the results pane the whole terminal, scrollable in every direction. `space z` again brings the other panes back exactly as they were.
 
 <img src="readme/zoom.webp" alt="The results pane zoomed to the full terminal" width="90%" />
+
+</td>
+</tr>
+<tr>
+<td colspan="2" align="center">
+
+**Structure: a relation down to its keys**
+
+`S` on a relation in the schema, `space v s` or `:inspect orders` shows its columns, indexes, constraints and definition in the results pane, on SQLite and Postgres. `Tab` or `1`-`4` switch sections, `q` goes back to the result.
+
+<img src="readme/structure.webp" alt="The structure of the orders table: columns with types, defaults and references, and counts of indexes and constraints" width="90%" />
 
 </td>
 </tr>
@@ -144,7 +155,7 @@ Three steps on the first run: connect a database, choose an agent, pick a look. 
 Install the prebuilt binary for Linux (`x86_64`, `arm64`) or macOS (`x86_64`, `arm64`) from [GitHub Releases](https://github.com/DennisLoska/losql/releases):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/DennisLoska/losql/v0.2.0/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/DennisLoska/losql/v0.3.0/install.sh | sh
 ```
 
 Or build from source with [Bun](https://bun.sh) (developed and tested with Bun 1.3.9):
@@ -176,8 +187,8 @@ Then, in the editor: `i` to type, `Esc` and `Enter` to run the statement under t
 | --- | --- |
 | **Write queries** | A modal editor with vim motions, operators, text objects, registers, dot repeat, undo and search. SQL highlighting for SQLite and Postgres. Completion of keywords, tables and columns from the live schema. Several buffers, saved per connection and restored on the next start. |
 | **Let the agent write them** | Ask in plain words, or have the agent explain a statement, fix the last error or optimize a query. It reads the schema and may run read-only queries before it proposes SQL. You decide whether a proposal goes into the editor or runs. |
-| **Look at results** | A table with a cell cursor and horizontal scrolling, highlighted JSON, and a Record view for one row. Search, yank a cell or rows as JSON, zoom to full screen with `space z`. |
-| **Browse the schema** | A tree of namespaces, relations and columns with types and keys. Peek at a relation's rows, insert a name into the editor, filter with `/`. |
+| **Look at results** | A box-drawn table with a cell cursor and horizontal scrolling, highlighted JSON, and a Record view for one row. Search, yank a cell or rows as JSON, zoom to full screen with `space z`. |
+| **Browse the schema** | A tree of namespaces, relations and columns with types and keys. Peek at a relation's rows, insert a name into the editor, filter with `/`. Inspect a relation's structure (columns, indexes, constraints, definition) with `S`. |
 | **SQLite and Postgres** | Both in process: no server, no driver to install. Saved connections can read their password from the environment. Run one statement, a selection or the whole buffer; `:explain` shows the plan. |
 | **Stay safe** | The agent's queries run read-only. A proposal that changes data asks before it runs. After a lost connection a statement that changes data is never sent twice. Passwords are hidden on screen and are not handed to the agent's process. |
 | **Make it yours** | Eight themes in opencode's theme format, opaque or transparent, with animations you can turn off. The `omarchy` theme follows Omarchy. |
@@ -194,12 +205,13 @@ losql is modal, like vim. `space` (the default leader key) opens a menu of actio
 | Everywhere | `shift+h/j/k/l` move between panes (also `ctrl+h/j/k/l` and `ctrl+w h/j/k/l/w`), whenever you are not typing text. `space z` zooms the results pane to full screen and back. `ctrl+c` cancels a running statement or agent turn; twice within 1s it quits (in insert mode `ctrl+c` leaves insert mode; a `ctrl+c` that closes a dialog or a popup does not count towards quitting) |
 | Editor | vim motions, operators (`d`, `c`, `y`, `>`, `<`), text objects (`is`/`as` is the SQL statement), registers, `.`, `u`/`ctrl+r` undo/redo, `/` and `?` search (`n`/`N`). `Enter` runs the statement under the cursor, in visual mode the selection. `ctrl+s` (or `ctrl+enter`) runs the statement under the cursor from any mode. `gt`/`gT` switch buffers. `gJ` joins lines (plain `J` moves to the results pane; with a count, as in `3J`, it still joins). In insert mode `ctrl+n`/`ctrl+p` complete the word before the cursor (nothing without a typed prefix, except after `name.`); a name that needs quotes is inserted quoted, also inside a quoted name |
 | Results | `h j k l`, `gg G`, `0 $`, `ctrl+d`/`ctrl+u` move the cell cursor. `Tab`/`shift+Tab` switch Table, JSON and Record. `Enter` opens the row in Record view (`q` or `Esc` returns). `y` yanks the cell, `yy` or `Y` the row as JSON, `V…y` several rows as a JSON array. `/` searches (`?` too in JSON view) |
-| Schema | `j k`, `gg G`, `ctrl+d`/`ctrl+u` move, `l`/`h` expand and collapse, `Enter` toggles a namespace or peeks at a relation, `i` inserts the selected name into the editor, `y` yanks it, `/` filters, `R` refreshes |
+| Schema | `j k`, `gg G`, `ctrl+d`/`ctrl+u` move, `l`/`h` expand and collapse, `Enter` toggles a namespace or peeks at a relation, `i` inserts the selected name into the editor, `y` yanks it, `S` inspects the relation's structure, `/` filters, `R` refreshes |
+| Structure | Opened with `S` in the schema, `space v s` or `:inspect [relation]` (`:view structure`). `Tab`/`shift+Tab` or `1`-`4` switch Columns, Indexes, Constraints and Definition. `h j k l`, `gg G` move, `Enter` shows the row's details, `y` yanks, `c` picks another relation, `R` reloads, `q` or `Esc` returns to the result |
 | Agent | `j k`, `gg G`, `ctrl+d`/`ctrl+u` scroll, `i` (or `a`) to type, `Enter` to send, `ctrl+j` for a new line. `{`/`}` choose a proposal, `Enter` accepts it into the editor, `r` runs it, `y` yanks it. `Esc` then `shift+h` goes back to the editor |
 
-Leader menu: `r` run, `R` run all, `x` explain, `e` schema, `z` zoom results, `a…` agent (`a a` toggle/focus agent, `a i` ask, `a e` explain, `a f` fix the last error, `a o` optimize, `a n` new conversation), `v…` result view (`v t` Table, `v j` JSON, `v r` Record), `b…` buffers (`b l` list, `b n` new, `b d` close), `c` connections, `p` provider, `m` model, `t` themes, `h` history, `?` help.
+Leader menu: `r` run, `R` run all, `x` explain, `e` schema, `z` zoom results, `a…` agent (`a a` toggle/focus agent, `a i` ask, `a e` explain, `a f` fix the last error, `a o` optimize, `a n` new conversation), `v…` result view (`v t` Table, `v j` JSON, `v r` Record, `v s` Structure), `b…` buffers (`b l` list, `b n` new, `b d` close), `c` connections, `p` provider, `m` model, `t` themes, `h` history, `?` help.
 
-Commands: `:q`, `:w [path]`, `:e <path>`, `:new`, `:ls`, `:bn`, `:bp`, `:bd`, `:run [all]`, `:explain [analyze]`, `:connect [name, url or path]`, `:connections`, `:provider`, `:model`, `:theme [name]`, `:set [no]transparent`, `:set [no]animations`, `:set maxrows=<n>`, `:view table|json|record`, `:zoom`, `:ask [text]`, `:history`, `:refresh`, `:noh`, `:help`, `:<line>`.
+Commands: `:q`, `:w [path]`, `:e <path>`, `:new`, `:ls`, `:bn`, `:bp`, `:bd`, `:run [all]`, `:explain [analyze]`, `:connect [name, url or path]`, `:connections`, `:provider`, `:model`, `:theme [name]`, `:set [no]transparent`, `:set [no]animations`, `:set maxrows=<n>`, `:view table|json|record|structure`, `:inspect [relation]`, `:zoom`, `:ask [text]`, `:history`, `:refresh`, `:noh`, `:help`, `:<line>`.
 
 ---
 

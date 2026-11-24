@@ -48,6 +48,10 @@ _Avoid_: result set, response, output
 One way of displaying a Result: Table, JSON or Record.
 _Avoid_: mode, tab, view (alone; it collides with database views)
 
+**Structure**:
+The inspection of one Relation's columns, indexes, constraints and available definition in the Results Pane.
+_Avoid_: schema tab, table info, ddl view
+
 **Record**:
 One row of a Result shown as a vertical list of fields.
 _Avoid_: detail, row view

@@ -949,7 +949,8 @@ describe("workspace context and workspace tools in buildPrompt", () => {
     const prompt = buildPrompt({
       connection: conn,
       digest: "orders(id integer pk, status text)",
-      hasWorkspaceTools: true,
+      hasReadBuffer: true,
+      hasReadResults: true,
       turn: {
         intent: "ask",
         text: "filter this to paid",
@@ -1008,7 +1009,8 @@ describe("workspace context and workspace tools in buildPrompt", () => {
     const p = buildPrompt({
       connection: conn,
       digest: "t(k text)",
-      hasWorkspaceTools: true,
+      hasReadBuffer: true,
+      hasReadResults: true,
       turn: { intent: "ask", text: "next", conversation: [earlier] },
       steps: [],
       dataAccess: "schema",
@@ -1016,6 +1018,38 @@ describe("workspace context and workspace tools in buildPrompt", () => {
     });
     expect(p).not.toContain(SECRET);
     expect(p).toContain("select * from orders");
+  });
+
+  test("read_buffer and read_results actions and rules are advertised independently", () => {
+    const combinations = [
+      { hasReadBuffer: false, hasReadResults: false },
+      { hasReadBuffer: true, hasReadResults: false },
+      { hasReadBuffer: false, hasReadResults: true },
+      { hasReadBuffer: true, hasReadResults: true },
+    ];
+    const rulesOf = (prompt: string): string => {
+      const block = prompt.split("\n\n").find((part) => part.startsWith("# Rules"));
+      expect(block).toBeDefined();
+      return block!;
+    };
+
+    for (const { hasReadBuffer, hasReadResults } of combinations) {
+      const prompt = buildPrompt({
+        connection: conn,
+        digest: "t(a text)",
+        turn: { intent: "ask", text: "hi", conversation: [] },
+        steps: [],
+        dataAccess: "rows",
+        forceAnswer: false,
+        hasReadBuffer,
+        hasReadResults,
+      });
+      const rules = rulesOf(prompt);
+      expect(prompt.includes('{"action":"read_buffer"')).toBe(hasReadBuffer);
+      expect(prompt.includes('{"action":"read_results"')).toBe(hasReadResults);
+      expect(rules.includes("read_buffer")).toBe(hasReadBuffer);
+      expect(rules.includes("read_results")).toBe(hasReadResults);
+    }
   });
 });
 

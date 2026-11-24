@@ -14,9 +14,42 @@ import { printable } from "./printable";
 interface KeyMenuController {
   active: () => boolean;
   currentNodes: () => LeaderNode<AppApi>[];
+  grid: () => MenuGrid;
+  page: () => number;
   progress: () => number;
   open: (tree: LeaderNode<AppApi>[]) => void;
   close: () => void;
+}
+
+/** How the entries fit the terminal: columns of `rows` entries, `pages` pages when they overflow. */
+interface MenuGrid {
+  colCount: number;
+  colWidth: number;
+  rows: number;
+  pageSize: number;
+  pages: number;
+}
+
+const COL_WIDTH = 28;
+const MAX_ENTRY_ROWS = 10;
+
+/**
+ * The grid for `count` entries in a terminal: up to four columns, up to ten rows. When they do not fit,
+ * one row is kept for the page footer and the entries are split into pages.
+ */
+function menuGrid(count: number, termWidth: number, termHeight: number): MenuGrid {
+  const maxPanelHeight = Math.max(3, termHeight - 2);
+  const colCount = Math.max(1, Math.min(4, Math.floor((termWidth - 4) / COL_WIDTH)));
+  const availableWidth = Math.max(colCount, termWidth - 4 - (colCount - 1) * 4);
+  const colWidth = Math.max(6, Math.min(COL_WIDTH, Math.floor(availableWidth / colCount)));
+  const maxEntryRows = Math.max(1, Math.min(MAX_ENTRY_ROWS, maxPanelHeight - 2));
+  const unclippedRows = Math.max(1, Math.ceil(count / colCount));
+  if (unclippedRows <= maxEntryRows) {
+    return { colCount, colWidth, rows: unclippedRows, pageSize: Math.max(1, count), pages: 1 };
+  }
+  const rows = Math.max(1, maxEntryRows - 1);
+  const pageSize = rows * colCount;
+  return { colCount, colWidth, rows, pageSize, pages: Math.max(1, Math.ceil(count / pageSize)) };
 }
 
 function truncateCells(text: string, maxCells: number): string {
@@ -28,8 +61,10 @@ function createKeyMenuController(getApi: () => AppApi): KeyMenuController {
   const deps = useDeps();
   const config = useConfig();
   const keys = useKeys();
+  const dimensions = useTerminalDimensions();
 
   const [stack, setStack] = createSignal<LeaderNode<AppApi>[][]>([]);
+  const [pageSignal, setPage] = createSignal(0);
   const [targetProgress, setTargetProgress] = createSignal(0);
 
   const progress = createTween(targetProgress, {
@@ -46,6 +81,7 @@ function createKeyMenuController(getApi: () => AppApi): KeyMenuController {
       removeLayer = null;
     }
     setStack([]);
+    setPage(0);
     setTargetProgress(0);
   };
 
@@ -54,11 +90,22 @@ function createKeyMenuController(getApi: () => AppApi): KeyMenuController {
     return s[s.length - 1] ?? [];
   });
 
+  const grid = createMemo(() => menuGrid(currentNodes().length, dimensions().width, dimensions().height));
+  // Clamped on every read, so a terminal that grows never leaves the menu on a page that is gone.
+  const page = createMemo(() => Math.max(0, Math.min(grid().pages - 1, pageSignal())));
+  const turnPage = (delta: 1 | -1): boolean => {
+    const pages = grid().pages;
+    if (pages <= 1) return false;
+    setPage((page() + delta + pages) % pages);
+    return true;
+  };
+
   const open = (tree: LeaderNode<AppApi>[]) => {
     close();
     if (tree.length === 0) return;
 
     setStack([tree]);
+    setPage(0);
     setTargetProgress(1);
 
     removeLayer = keys.pushLayer(
@@ -67,6 +114,7 @@ function createKeyMenuController(getApi: () => AppApi): KeyMenuController {
           const s = stack();
           if (s.length > 1) {
             setStack(s.slice(0, -1));
+            setPage(0);
           } else {
             close();
           }
@@ -81,6 +129,7 @@ function createKeyMenuController(getApi: () => AppApi): KeyMenuController {
           return true;
         }
 
+        // Every entry's key works from any page: the lookup is over all of the current entries.
         if (!key.ctrl && !key.meta && key.text !== undefined) {
           const match = currentNodes().find((n) => n.key === key.text);
           if (match) {
@@ -89,8 +138,17 @@ function createKeyMenuController(getApi: () => AppApi): KeyMenuController {
               void getApi().commands.run(match.command.id, "");
             } else {
               setStack((prev) => [...prev, match.children]);
+              setPage(0);
             }
             return true;
+          }
+        }
+
+        if (!key.ctrl && !key.meta) {
+          if (key.name === "pagedown" || key.text === "]") {
+            if (turnPage(1)) return true;
+          } else if (key.name === "pageup" || key.text === "[") {
+            if (turnPage(-1)) return true;
           }
         }
 
@@ -106,6 +164,8 @@ function createKeyMenuController(getApi: () => AppApi): KeyMenuController {
   return {
     active: () => stack().length > 0,
     currentNodes,
+    grid,
+    page,
     progress,
     open,
     close,
@@ -125,50 +185,31 @@ export function KeyMenu(props: {
     const nodes = controller.currentNodes();
     if (nodes.length === 0) {
       return {
-        columns: [] as Array<Array<LeaderNode<AppApi> | { kind: "more"; count: number }>>,
-        colWidth: 28,
+        columns: [] as LeaderNode<AppApi>[][],
+        colWidth: COL_WIDTH,
         panelHeight: 0,
+        footer: null as string | null,
       };
     }
 
-    const termWidth = dimensions().width;
-    const termHeight = dimensions().height;
-    const maxPanelHeight = Math.max(3, termHeight - 2);
-    const colCount = Math.max(1, Math.min(4, Math.floor((termWidth - 4) / 28)));
-    const availableWidth = Math.max(colCount, termWidth - 4 - (colCount - 1) * 4);
-    const colWidth = Math.max(6, Math.min(28, Math.floor(availableWidth / colCount)));
+    const grid = controller.grid();
+    const page = controller.page();
+    const shown = nodes.slice(page * grid.pageSize, (page + 1) * grid.pageSize);
 
-    const unclippedRowsPerCol = Math.max(1, Math.ceil(nodes.length / colCount));
-    const maxEntryRows = Math.max(1, Math.min(10, maxPanelHeight - 2));
-    const rowsPerCol = Math.min(unclippedRowsPerCol, maxEntryRows);
-
-    const capacity = rowsPerCol * colCount;
-    const overflows = nodes.length > capacity;
-
-    type CellItem = LeaderNode<AppApi> | { kind: "more"; count: number };
-    const items: CellItem[] = overflows
-      ? [
-          ...nodes.slice(0, Math.max(0, capacity - 1)),
-          { kind: "more", count: nodes.length - Math.max(0, capacity - 1) },
-        ]
-      : [...nodes];
-
-    const cols: CellItem[][] = [];
-    for (let i = 0; i < items.length; i += rowsPerCol) {
-      cols.push(items.slice(i, i + rowsPerCol));
+    const cols: LeaderNode<AppApi>[][] = [];
+    for (let i = 0; i < shown.length; i += grid.rows) {
+      cols.push(shown.slice(i, i + grid.rows));
     }
 
-    let maxColRows = 0;
-    for (const col of cols) {
-      if (col.length > maxColRows) maxColRows = col.length;
-    }
-
-    const panelHeight = Math.min(maxPanelHeight, maxColRows + 2);
+    const footer = grid.pages > 1 ? `page ${page + 1}/${grid.pages} · PgUp/PgDn` : null;
+    const maxPanelHeight = Math.max(3, dimensions().height - 2);
+    const panelHeight = Math.min(maxPanelHeight, grid.rows + 2 + (footer ? 1 : 0));
 
     return {
       columns: cols,
-      colWidth,
+      colWidth: grid.colWidth,
       panelHeight,
+      footer,
     };
   });
 
@@ -192,63 +233,58 @@ export function KeyMenu(props: {
         paddingBottom={1}
         paddingLeft={2}
         paddingRight={2}
-        flexDirection="row"
-        gap={4}
+        flexDirection="column"
       >
-        <For each={layout().columns}>
-          {(col) => (
-            <box flexDirection="column" width={layout().colWidth} flexShrink={0}>
-              <For each={col}>
-                {(node) => {
-                  if (node.kind === "more") {
+        <box flexDirection="row" gap={4} flexGrow={1}>
+          <For each={layout().columns}>
+            {(col) => (
+              <box flexDirection="column" width={layout().colWidth} flexShrink={0}>
+                <For each={col}>
+                  {(node) => {
+                    const keyPart = () => `${printable(node.key)}  `;
+                    const titleBudget = () =>
+                      Math.max(1, layout().colWidth - cellWidth(keyPart()));
+                    const label = () => {
+                      const raw =
+                        node.kind === "group"
+                          ? `+${printable(node.label)}`
+                          : printable(node.command.title);
+                      return truncateCells(raw, titleBudget());
+                    };
+                    const labelColor = () =>
+                      node.kind === "group" ? theme.color("accent") : theme.color("text");
                     return (
                       <box flexDirection="row" height={1} width={layout().colWidth}>
                         <text
-                          fg={theme.color("textMuted")}
+                          fg={theme.color("primary")}
+                          bg={theme.color("overlayBackground")}
+                          attributes={TextAttributes.BOLD}
+                          flexShrink={0}
+                        >
+                          {keyPart()}
+                        </text>
+                        <text
+                          fg={labelColor()}
                           bg={theme.color("overlayBackground")}
                           flexShrink={0}
                         >
-                          {`… ${node.count} more`}
+                          {label()}
                         </text>
                       </box>
                     );
-                  }
-                  const keyPart = () => `${printable(node.key)}  `;
-                  const titleBudget = () =>
-                    Math.max(1, layout().colWidth - cellWidth(keyPart()));
-                  const label = () => {
-                    const raw =
-                      node.kind === "group"
-                        ? `+${printable(node.label)}`
-                        : printable(node.command.title);
-                    return truncateCells(raw, titleBudget());
-                  };
-                  const labelColor = () =>
-                    node.kind === "group" ? theme.color("accent") : theme.color("text");
-                  return (
-                    <box flexDirection="row" height={1} width={layout().colWidth}>
-                      <text
-                        fg={theme.color("primary")}
-                        bg={theme.color("overlayBackground")}
-                        attributes={TextAttributes.BOLD}
-                        flexShrink={0}
-                      >
-                        {keyPart()}
-                      </text>
-                      <text
-                        fg={labelColor()}
-                        bg={theme.color("overlayBackground")}
-                        flexShrink={0}
-                      >
-                        {label()}
-                      </text>
-                    </box>
-                  );
-                }}
-              </For>
-            </box>
-          )}
-        </For>
+                  }}
+                </For>
+              </box>
+            )}
+          </For>
+        </box>
+        <Show when={layout().footer}>
+          <box height={1} width="100%" flexShrink={0}>
+            <text fg={theme.color("textMuted")} bg={theme.color("overlayBackground")} flexShrink={0}>
+              {truncateCells(layout().footer!, Math.max(1, dimensions().width - 4))}
+            </text>
+          </box>
+        </Show>
       </box>
     </Show>
   );

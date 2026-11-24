@@ -93,11 +93,11 @@ function wrapWords(text: string, maxWidth: number): string[] {
   return lines;
 }
 
-const GLOBAL_KEYS: ReadonlyArray<readonly [string, string]> = [
+const globalKeys = (leader: string): ReadonlyArray<readonly [string, string]> => [
   ["ctrl+w h/j/k/l/w", "focus the Pane to the left, below, above, right, or the next one"],
   ["ctrl+h/j/k/l", "focus the Pane to the left, below, above, or right"],
   ["shift+h/j/k/l", "the same, when the Pane takes no text and no vim command is in progress"],
-  ["space", "Leader: open the key menu"],
+  [leader, "Leader: open the key menu"],
   [":", "command line"],
   ["ctrl+p", "command palette"],
   ["ctrl+c", "cancel the running Run or Turn; pressed twice within a second, quit"],
@@ -123,10 +123,23 @@ const RESULTS_KEYS: ReadonlyArray<readonly [string, string]> = [
   ["/, n, N", "search cells"],
 ];
 
+const structureKeys = (leader: string): ReadonlyArray<readonly [string, string]> => [
+  [`S (Schema), ${keyLabel("v s", leader)}`, "inspect the Relation's structure in Results"],
+  [":inspect [name], :view structure", "inspect a Relation's structure; without a name, pick one"],
+  ["Tab / shift+Tab, 1-4", "switch section: Columns, Indexes, Constraints, Definition"],
+  ["h j k l, 0 $, gg G, ctrl+d/u", "move the cell cursor, or scroll the Definition"],
+  ["Enter", "show the selected row in full"],
+  ["y", "yank the cell, or the whole Definition"],
+  ["c", "pick another Relation"],
+  ["R", "reload the structure"],
+  ["q / Esc", "return to the Result view and the Pane focused before"],
+];
+
 const SCHEMA_KEYS: ReadonlyArray<readonly [string, string]> = [
   ["j k gg G", "move selection"],
   ["l / h", "expand and collapse"],
   ["Enter", "peek Relation into Results"],
+  ["S", "inspect the Relation's structure"],
   ["i", "insert the name at the editor cursor"],
   ["y", "yank the name"],
   ["/", "filter"],
@@ -160,6 +173,7 @@ function collectLeaderCommands(nodes: LeaderNode<AppApi>[]): Command<AppApi>[] {
 function buildHelpItems(api: AppApi): HelpItem[] {
   const rows: HelpItem[] = [];
   const leader = api.config.config().leader;
+  const leaderLabel = keyLabel("", leader).trimEnd();
 
   const addSection = (title: string, entries: ReadonlyArray<readonly [string, string]>) => {
     if (rows.length > 0) rows.push({ kind: "blank" });
@@ -169,7 +183,7 @@ function buildHelpItems(api: AppApi): HelpItem[] {
     }
   };
 
-  addSection("Global", GLOBAL_KEYS);
+  addSection("Global", globalKeys(leaderLabel));
 
   const leaderCmds = collectLeaderCommands(api.commands.registry.leaderTree(api));
   const leaderEntries: Array<readonly [string, string]> = leaderCmds
@@ -179,6 +193,7 @@ function buildHelpItems(api: AppApi): HelpItem[] {
 
   addSection("Editor", EDITOR_KEYS);
   addSection("Results", RESULTS_KEYS);
+  addSection("Structure", structureKeys(leader));
   addSection("Schema", SCHEMA_KEYS);
   addSection("Agent", AGENT_KEYS);
 

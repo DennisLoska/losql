@@ -3,7 +3,7 @@ import { redactConnectionText } from "../db/redact";
 import type { Cell, Driver, Result, SchemaSnapshot } from "../db/types";
 import { type Token, tokenize } from "../sql/lexer";
 import { splitStatements } from "../sql/statements";
-import { describeRelations, schemaDigest } from "./digest";
+import { describeRelations, describeRelationsWithDetails, schemaDigest } from "./digest";
 import {
   AGENT_QUERY_TIMEOUT_MS,
   MAX_AGENT_CELL,
@@ -79,7 +79,7 @@ export type ShownResultsSnapshot =
 
 export interface AgentDeps {
   ask: (prompt: string, system: string, onText?: (text: string) => void) => Promise<string>;
-  driver: Pick<Driver, "run" | "schema" | "connection">;
+  driver: Pick<Driver, "run" | "schema" | "connection" | "describeRelation">;
   config: Config["agent"];
   signal?: AbortSignal;
   readBuffer?: (
@@ -113,6 +113,31 @@ function cutAtCodePoint(text: string, maxChars: number): string {
   return text;
 }
 
+/**
+ * Keeps text within `maxCodePoints` Unicode code points. Longer text keeps its first
+ * `maxCodePoints - 1` code points and ends with "…", so the result never exceeds the cap.
+ */
+function cutToCodePoints(text: string, maxCodePoints: number): { text: string; cut: boolean } {
+  if (text.length <= maxCodePoints) {
+    return { text, cut: false };
+  }
+  let count = 0;
+  let index = 0;
+  let cutIndex = 0;
+  while (index < text.length) {
+    if (count === maxCodePoints - 1) {
+      cutIndex = index;
+    }
+    if (count === maxCodePoints) {
+      return { text: `${text.slice(0, cutIndex)}…`, cut: true };
+    }
+    const codePoint = text.codePointAt(index)!;
+    index += codePoint > 0xffff ? 2 : 1;
+    count++;
+  }
+  return { text, cut: false };
+}
+
 function truncateColumnName(name: string): string {
   return cutAtCodePoint(name, MAX_COLUMN_NAME_CHARS);
 }
@@ -122,15 +147,15 @@ export function sanitizeAgentError(message: string): string {
     /([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)[^/\s@]+@/g,
     "$1***@",
   );
-  return cutAtCodePoint(redacted, MAX_AGENT_ERROR);
+  return cutToCodePoints(redacted, MAX_AGENT_ERROR).text;
 }
 
-function truncateCell(cell: Cell): null | boolean | number | string {
+function truncateCell(cell: Cell): { value: null | boolean | number | string; cut: boolean } {
   if (cell === null || typeof cell === "boolean" || typeof cell === "number") {
-    return cell;
+    return { value: cell, cut: false };
   }
-  const text = typeof cell === "string" ? cell : JSON.stringify(cell);
-  return cutAtCodePoint(text, MAX_AGENT_CELL);
+  const bounded = cutToCodePoints(typeof cell === "string" ? cell : JSON.stringify(cell), MAX_AGENT_CELL);
+  return { value: bounded.text, cut: bounded.cut };
 }
 
 function formatBoundedResultPayload(res: Result, statement?: string): string {
@@ -138,7 +163,14 @@ function formatBoundedResultPayload(res: Result, statement?: string): string {
   const keptCols = res.columns.slice(0, MAX_AGENT_COLUMNS);
   const columns = keptCols.map((c) => truncateColumnName(c.name));
   const limitedRows = res.rows.slice(0, MAX_AGENT_ROWS);
-  const rows = limitedRows.map((row) => row.slice(0, MAX_AGENT_COLUMNS).map(truncateCell));
+  let cellCut = false;
+  const rows = limitedRows.map((row) =>
+    row.slice(0, MAX_AGENT_COLUMNS).map((cell) => {
+      const bounded = truncateCell(cell);
+      cellCut ||= bounded.cut;
+      return bounded.value;
+    }),
+  );
   const payload: {
     statement?: string;
     columns: string[];
@@ -149,7 +181,8 @@ function formatBoundedResultPayload(res: Result, statement?: string): string {
     ...(statement !== undefined ? { statement: cutAtCodePoint(statement, MAX_AGENT_SQL_CHARS) } : {}),
     columns,
     rows,
-    truncated: res.truncated || res.rows.length > MAX_AGENT_ROWS,
+    truncated:
+      res.truncated || res.rows.length > MAX_AGENT_ROWS || totalCols > MAX_AGENT_COLUMNS || cellCut,
   };
   if (totalCols > MAX_AGENT_COLUMNS) {
     payload.columnsOmitted = totalCols - MAX_AGENT_COLUMNS;
@@ -174,18 +207,43 @@ async function executeQueryStep(
     return JSON.stringify({ error: "send exactly one statement per query" });
   }
 
+  const statement = statements[0]!.text;
   try {
-    const res = await deps.driver.run(statements[0]!.text, {
+    const res = await deps.driver.run(statement, {
       readOnly: true,
       maxRows: MAX_AGENT_ROWS,
       timeoutMs: AGENT_QUERY_TIMEOUT_MS,
       signal: deps.signal,
     });
-    return formatBoundedResultPayload(res);
+    return formatBoundedResultPayload(res, statement);
   } catch (err) {
     const rawMessage = err instanceof Error ? err.message : String(err);
-    return JSON.stringify({ error: sanitizeAgentError(rawMessage) });
+    return JSON.stringify({
+      statement: cutAtCodePoint(statement, MAX_AGENT_SQL_CHARS),
+      error: sanitizeAgentError(rawMessage),
+    });
   }
+}
+
+function isCancellation(err: unknown, signal?: AbortSignal): boolean {
+  return Boolean(signal?.aborted) || (err instanceof Error && err.name === "AbortError");
+}
+
+async function executeDescribeStep(
+  schema: SchemaSnapshot,
+  relations: string[],
+  deps: AgentDeps,
+): Promise<string> {
+  const driver = deps.driver;
+  if (!driver.describeRelation) {
+    return describeRelations(schema, relations);
+  }
+  return describeRelationsWithDetails(
+    schema,
+    relations,
+    (ref) => driver.describeRelation!(ref, { signal: deps.signal }),
+    deps.signal,
+  );
 }
 
 const EXPLAIN_LEGACY_OPTIONS = new Set([
@@ -388,7 +446,8 @@ export async function runAgent(
   const steps: StepRecord[] = [];
   let corrected = false;
   let correction: string | undefined;
-  const hasWorkspaceTools = Boolean(deps.readBuffer || deps.readResults);
+  const hasReadBuffer = Boolean(deps.readBuffer);
+  const hasReadResults = Boolean(deps.readResults) && deps.config.dataAccess !== "schema";
 
   const emit = (event: AgentEvent) => {
     try {
@@ -432,7 +491,8 @@ export async function runAgent(
       dataAccess: deps.config.dataAccess,
       forceAnswer,
       correction,
-      hasWorkspaceTools,
+      hasReadBuffer,
+      hasReadResults,
     });
 
     let reply: string;
@@ -495,7 +555,15 @@ export async function runAgent(
     } else if (action.action === "read_results") {
       result = executeReadResultsStep(deps);
     } else {
-      result = describeRelations(schema, action.relations);
+      try {
+        result = await executeDescribeStep(schema, action.relations, deps);
+      } catch (err) {
+        if (isCancellation(err, deps.signal)) {
+          return fail("cancelled", "the turn was cancelled");
+        }
+        const rawMessage = err instanceof Error ? err.message : String(err);
+        result = JSON.stringify({ error: sanitizeAgentError(rawMessage) });
+      }
     }
 
     const step: StepRecord = { action, result };

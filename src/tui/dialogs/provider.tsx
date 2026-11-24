@@ -419,7 +419,7 @@ export function openProviders(
                 label: adapter.label,
                 binary: adapter.binaries[0] ?? choice,
                 installHint: adapter.installHint,
-              });
+              }, api.config.config().leader);
 
               const action = await selectFailedTestAction(
                 api,

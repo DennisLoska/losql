@@ -15,6 +15,7 @@ import { copyToClipboard } from "../../../core/clipboard";
 import type { Key } from "../../../core/vim/keys";
 import { useAgent } from "../../context/agent";
 import { useCommands } from "../../context/commands";
+import { useConfig } from "../../context/config";
 import { useDeps } from "../../context/deps";
 import { useFocus } from "../../context/focus";
 import { useKeys } from "../../context/keys";
@@ -41,11 +42,12 @@ export function AgentPane(): JSX.Element {
   const commands = useCommands();
   const session = useSession();
   const agent = useAgent();
+  const config = useConfig();
 
   const [mode, setMode] = createSignal<"normal" | "insert">("normal");
   const [pendingG, setPendingG] = createSignal(false);
   const input = createLineInput({ multiline: true });
-  let transcriptHandle: TranscriptHandle | null = null;
+  const [transcriptHandle, setTranscriptHandle] = createSignal<TranscriptHandle | null>(null);
 
   const isSetupState = createMemo(() => {
     const prov = agent.provider();
@@ -137,7 +139,7 @@ export function AgentPane(): JSX.Element {
     if (pendingG()) {
       setPendingG(false);
       if (isPlain && key.text === "g") {
-        transcriptHandle?.scrollToTop();
+        transcriptHandle()?.scrollToTop();
         return true;
       }
       return false;
@@ -149,27 +151,27 @@ export function AgentPane(): JSX.Element {
     }
 
     if (isPlain && (key.text === "j" || key.name === "down")) {
-      transcriptHandle?.scrollBy(1);
+      transcriptHandle()?.scrollBy(1);
       return true;
     }
 
     if (isPlain && (key.text === "k" || key.name === "up")) {
-      transcriptHandle?.scrollBy(-1);
+      transcriptHandle()?.scrollBy(-1);
       return true;
     }
 
     if (key.ctrl && !key.meta && key.name === "d") {
-      transcriptHandle?.scrollPage(1);
+      transcriptHandle()?.scrollPage(1);
       return true;
     }
 
     if (key.ctrl && !key.meta && key.name === "u") {
-      transcriptHandle?.scrollPage(-1);
+      transcriptHandle()?.scrollPage(-1);
       return true;
     }
 
     if (isPlain && key.text === "G") {
-      transcriptHandle?.scrollToBottom();
+      transcriptHandle()?.scrollToBottom();
       return true;
     }
 
@@ -178,7 +180,7 @@ export function AgentPane(): JSX.Element {
       agent.select(dir);
       const sel = agent.selected();
       if (sel) {
-        transcriptHandle?.scrollToProposal(sel.id);
+        transcriptHandle()?.scrollToProposal(sel.id);
       }
       return true;
     }
@@ -239,10 +241,19 @@ export function AgentPane(): JSX.Element {
     keys.setPasteHandler("agent", null);
   });
 
+  const scrollPosition = createMemo(() => {
+    const handle = transcriptHandle();
+    if (!handle) return "";
+    const { effectiveScrollTop, maxScroll, totalLines } = handle.scrollPosition();
+    if (maxScroll === 0) return "";
+    if (effectiveScrollTop >= maxScroll) return "bot";
+    return `${effectiveScrollTop + 1}/${totalLines}`;
+  });
+
   status.register("agent", () => ({
     mode: mode() === "insert" ? "INSERT" : "NORMAL",
     pending: pendingG() ? "g" : "",
-    position: "",
+    position: scrollPosition(),
   }));
 
   commands.register({
@@ -394,8 +405,13 @@ export function AgentPane(): JSX.Element {
               turns={agent.turns()}
               provider={providerMeta()}
               selectedProposalId={agent.selected()?.id ?? null}
+              leader={config.config().leader}
               onReady={(h) => {
-                transcriptHandle = h;
+                setTranscriptHandle(() => h);
+                // onReady runs while the Transcript is built, so this cleanup belongs to it.
+                onCleanup(() => {
+                  if (transcriptHandle() === h) setTranscriptHandle(null);
+                });
               }}
             />
             <InputLine

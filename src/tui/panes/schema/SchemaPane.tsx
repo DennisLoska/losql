@@ -12,7 +12,7 @@ import {
   untrack,
 } from "solid-js";
 import { copyToClipboard } from "../../../core/clipboard";
-import type { Connection, SchemaSnapshot } from "../../../core/db/types";
+import type { Connection, RelationRef, SchemaSnapshot } from "../../../core/db/types";
 import type { Key } from "../../../core/vim/keys";
 import { useCmdline } from "../../context/commands";
 import { useConfig } from "../../context/config";
@@ -41,11 +41,15 @@ export interface SchemaApi {
   rows(): TreeRow[];
   cursor(): number;
   filter(): string;
+  /** The Relation of the selected relation or column row; null on a namespace row or an empty tree. */
+  selectedRelation(): RelationRef | null;
 }
 
 export function SchemaPane(props: {
   expose?: (api: SchemaApi) => void;
   onInsert?: (text: string) => void;
+  /** `S` on a relation or column row: inspect that Relation's Structure. */
+  onInspect?: (ref: RelationRef) => void;
 }): JSX.Element {
   const deps = useDeps();
   const config = useConfig();
@@ -250,6 +254,12 @@ export function SchemaPane(props: {
     });
   };
 
+  const selectedRelation = (): RelationRef | null => {
+    const row = rows()[clampedCursor()];
+    if (!row || row.kind === "namespace") return null;
+    return { namespace: row.namespace, name: row.relation.name };
+  };
+
   const runPeek = (namespace: string, relationName: string) => {
     const peekRows = config.config().results.peekRows;
     const sql = peekSql(namespace, relationName, peekRows);
@@ -259,6 +269,7 @@ export function SchemaPane(props: {
         readOnly: true,
         record: false,
         maxRows: peekRows,
+        previewRelationRef: { namespace, name: relationName },
       })
       .then((outcomes) => {
         const first = outcomes[0];
@@ -445,6 +456,13 @@ export function SchemaPane(props: {
       return true;
     }
 
+    if (isPlain && key.text === "S") {
+      clearPending();
+      const ref = selectedRelation();
+      if (ref) props.onInspect?.(ref);
+      return true;
+    }
+
     clearPending();
     return false;
   };
@@ -469,6 +487,7 @@ export function SchemaPane(props: {
     rows,
     cursor: clampedCursor,
     filter,
+    selectedRelation,
   };
 
   props.expose?.(api);
