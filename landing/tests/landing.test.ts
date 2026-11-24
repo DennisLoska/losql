@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -7,6 +8,10 @@ import { runInNewContext } from "node:vm";
 
 const ROOT = join(import.meta.dir, "..", "..");
 const BUILD_SCRIPT = join(ROOT, "landing", "build.mjs");
+const MEDIA_DIR = join(ROOT, "landing", "public", "media");
+// Content-hash cache busting: the first 8 hex chars of the media file's SHA-256.
+const mediaHash = (name: string) => createHash("sha256").update(readFileSync(join(MEDIA_DIR, name))).digest("hex").slice(0, 8);
+const mediaUrl = (name: string) => `/media/${name}?v=${mediaHash(name)}`;
 
 // A deliberately small DOM for this page's progressive enhancement script. Elements,
 // attributes and text come from the built HTML, never a hand-authored page fixture.
@@ -270,7 +275,7 @@ describe("landing/build.mjs and page content", () => {
       expect(structureTab.getAttribute("aria-controls")).toBe("tour-stop-panel-9");
       expect(structurePanel.getAttribute("aria-labelledby")).toBe("tour-stop-tab-9");
       const structureImage = structurePanel.querySelector(".zoomable img");
-      expect(structureImage.getAttribute("src")).toBe("/media/structure.webp");
+      expect(structureImage.getAttribute("src")).toBe(mediaUrl("structure.webp"));
       expect(structureImage.getAttribute("width")).toBe("1480");
       expect(structureImage.getAttribute("height")).toBe("980");
       expect(structurePanel.querySelector(".zoomable").getAttribute("aria-label")?.startsWith("Enlarge:")).toBe(true);
@@ -297,7 +302,7 @@ describe("landing/build.mjs and page content", () => {
       expect(hero.querySelectorAll(".zoomable")).toHaveLength(1);
       expect(hero.querySelectorAll("img")).toHaveLength(1);
       const heroImage = hero.querySelector(".zoomable img");
-      expect(heroImage.getAttribute("src")).toBe("/media/hero.webp");
+      expect(heroImage.getAttribute("src")).toBe(mediaUrl("hero.webp"));
       expect(heroImage.getAttribute("loading")).toBe("eager");
       expect(heroImage.getAttribute("fetchpriority")).toBe("high");
       expect(heroImage.getAttribute("decoding")).toBe("async");
@@ -393,7 +398,8 @@ describe("landing/build.mjs and page content", () => {
           const source = playing ? image.dataset.webp : image.dataset.static;
           if (source === undefined) throw new Error("Recording source is missing");
           expect(image.getAttribute("src")).toBe(source);
-          expect(image.dataset.webp).toEndWith(".webp");
+          expect(image.dataset.webp).toMatch(/^\/media\/[\w.-]+\.webp\?v=[0-9a-f]{8}$/);
+          expect(image.dataset.webp).toBe(mediaUrl(image.dataset.webp!.slice("/media/".length).split("?")[0]!));
         }
       };
 
@@ -406,7 +412,7 @@ describe("landing/build.mjs and page content", () => {
       checkRecordings(false);
       changeMotionPreference(false);
       checkRecordings(true);
-      expect(heroImage.getAttribute("src")).toBe("/media/hero.webp");
+      expect(heroImage.getAttribute("src")).toBe(mediaUrl("hero.webp"));
 
       const copy = document.querySelector("[data-copy]");
       const command = document.getElementById(copy.dataset.copy!).textContent;
@@ -564,7 +570,7 @@ describe("landing/build.mjs and page content", () => {
     expect(imports.length).toBeGreaterThan(0);
     for (const spec of imports) {
       if (spec === undefined) throw new Error("Import is missing its module specifier");
-      expect(["node:fs", "node:path", "node:url"]).toContain(spec);
+      expect(["node:crypto", "node:fs", "node:path", "node:url"]).toContain(spec);
     }
 
     const outDir = mkdtempSync(join(tmpdir(), "losql-landing-out-"));
@@ -717,6 +723,62 @@ describe("landing/build.mjs and page content", () => {
     }
   });
 
+  test("built index.html versions every /media/ reference with the file's content hash", () => {
+    const outDir = mkdtempSync(join(tmpdir(), "losql-landing-cache-bust-"));
+    try {
+      const build = spawnSync("node", [BUILD_SCRIPT], {
+        cwd: ROOT,
+        env: { ...process.env, LANDING_OUT: outDir },
+        encoding: "utf8",
+      });
+      expect(build.status).toBe(0);
+      const indexHtml = readFileSync(join(outDir, "index.html"), "utf8");
+
+      // (a) Every /media/ reference, relative or absolute, carries ?v=<hash8> of the real bytes.
+      const references = [...indexHtml.matchAll(/(?:https:\/\/losql\.dev)?\/media\/([^"'\s?#<>]+)(\?[^"'\s#<>]*)?/g)];
+      expect(references.length).toBeGreaterThan(0);
+      for (const [reference, name, query] of references) {
+        expect(existsSync(join(MEDIA_DIR, name!))).toBe(true);
+        expect({ reference, query }).toEqual({ reference, query: `?v=${mediaHash(name!)}` });
+      }
+      const contexts: [string, RegExp][] = [
+        ["src", /\bsrc="\/media\//],
+        ["href", /\bhref="\/media\//],
+        ["data-webp", /\bdata-webp="\/media\//],
+        ["data-static", /\bdata-static="\/media\//],
+        ["og:image", /property="og:image" content="https:\/\/losql\.dev\/media\//],
+        ["twitter:image", /name="twitter:image" content="https:\/\/losql\.dev\/media\//],
+        ["JSON-LD screenshot", /"screenshot":"https:\/\/losql\.dev\/media\//],
+      ];
+      for (const [name, pattern] of contexts) expect({ name, present: pattern.test(indexHtml) }).toEqual({ name, present: true });
+      for (const [attribute, pattern] of [
+        ["src", /\bsrc="(\/media\/[^"]*)"/g],
+        ["data-webp", /\bdata-webp="(\/media\/[^"]*)"/g],
+        ["data-static", /\bdata-static="(\/media\/[^"]*)"/g],
+      ] as const) {
+        for (const [, url] of indexHtml.matchAll(pattern)) {
+          const name = url!.slice("/media/".length).split("?")[0]!;
+          expect({ attribute, url }).toEqual({ attribute, url: mediaUrl(name) });
+        }
+      }
+
+      // (b) The hero preload and the hero <img> request the identical versioned URL.
+      const page = createPageDOM(indexHtml);
+      const preload = page.document.querySelectorAll('link[rel="preload"]').find((link) => link.getAttribute("as") === "image");
+      const heroSrc = page.document.querySelector("#hero .zoomable img").getAttribute("src");
+      expect(heroSrc).toBe(mediaUrl("hero.webp"));
+      expect(preload?.getAttribute("href")).toBe(heroSrc);
+
+      // Sources and the other generated files stay canonical.
+      expect(readFileSync(join(ROOT, "landing/src/index.html"), "utf8")).not.toContain("?v=");
+      for (const file of ["404.html", "sitemap.xml", "robots.txt", "llms.txt", "site.webmanifest"]) {
+        expect({ file, versioned: readFileSync(join(outDir, file), "utf8").includes("?v=") }).toEqual({ file, versioned: false });
+      }
+    } finally {
+      rmSync(outDir, { recursive: true, force: true });
+    }
+  });
+
   test("built site includes comprehensive SEO metadata, JSON-LD structured data, image sitemap, llms.txt, and webmanifest", () => {
     const outDir = mkdtempSync(join(tmpdir(), "losql-landing-seo-"));
     try {
@@ -734,7 +796,7 @@ describe("landing/build.mjs and page content", () => {
       expect(indexHtml).toContain('<link rel="canonical" href="https://losql.dev/">');
       expect(indexHtml).toContain('<link rel="manifest" href="/site.webmanifest">');
       expect(indexHtml).toContain('<link rel="preload" href="/fonts/JetBrainsMono-latin.woff2" as="font" type="font/woff2" crossorigin>');
-      expect(indexHtml).toContain('<link rel="preload" href="/media/hero.webp" as="image" type="image/webp" fetchpriority="high">');
+      expect(indexHtml).toContain(`<link rel="preload" href="${mediaUrl("hero.webp")}" as="image" type="image/webp" fetchpriority="high">`);
 
       // Open Graph & Twitter Cards
       expect(indexHtml).toContain('<meta property="og:site_name" content="losql">');
@@ -745,7 +807,8 @@ describe("landing/build.mjs and page content", () => {
       expect(indexHtml).toContain('<meta name="twitter:card" content="summary_large_image">');
       expect(indexHtml).toContain('<meta name="twitter:title"');
       expect(indexHtml).toContain('<meta name="twitter:description"');
-      expect(indexHtml).toContain('<meta name="twitter:image" content="https://losql.dev/media/hero.webp">');
+      expect(indexHtml).toContain(`<meta name="twitter:image" content="https://losql.dev${mediaUrl("hero.webp")}">`);
+      expect(indexHtml).toContain(`<meta property="og:image" content="https://losql.dev${mediaUrl("hero.webp")}">`);
       expect(indexHtml).toContain('<meta name="twitter:image:alt"');
 
       // JSON-LD Structured Data
@@ -763,6 +826,7 @@ describe("landing/build.mjs and page content", () => {
       expect(appNode?.["applicationCategory"]).toBe("DeveloperApplication");
       expect(appNode?.["softwareVersion"]).toBe("0.3.0");
       expect(appNode?.["codeRepository"]).toBe("https://github.com/DennisLoska/losql");
+      expect(appNode?.["screenshot"]).toBe(`https://losql.dev${mediaUrl("hero.webp")}`);
       expect(siteNode).toBeDefined();
       expect(siteNode?.["url"]).toBe("https://losql.dev/");
 

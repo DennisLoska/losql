@@ -1,4 +1,5 @@
-import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -44,10 +45,25 @@ function validateTree(directory) {
 }
 validateTree(path.join(ROOT, "src"));
 validateTree(path.join(ROOT, "public"));
+// Content-hash every media file so /media/* URLs change whenever their bytes do; the CDN caches
+// /media/* for a day, so an unversioned URL would keep serving the previous capture after a deploy.
+const mediaDir = path.join(ROOT, "public", "media");
+const mediaHashes = new Map(
+  readdirSync(mediaDir)
+    .filter((name) => statSync(path.join(mediaDir, name)).isFile())
+    .map((name) => [name, createHash("sha256").update(readFileSync(path.join(mediaDir, name))).digest("hex").slice(0, 8)]),
+);
+// Matches /media/<file> and https://losql.dev/media/<file>; an existing query string is left alone.
+const versionMedia = (html) =>
+  html.replace(/(https:\/\/losql\.dev)?\/media\/([^"'\s?#<>]+)(\?)?/g, (reference, origin = "", name, query) => {
+    const hash = mediaHashes.get(name);
+    return query || !hash ? reference : `${origin}/media/${name}?v=${hash}`;
+  });
 // Validate everything before removing an earlier build.
 rmSync(OUT, { recursive: true, force: true });
 mkdirSync(path.join(OUT, "assets"), { recursive: true });
-for (const name of ["index.html", "404.html"]) cpSync(path.join(ROOT, "src", name), path.join(OUT, name));
+writeFileSync(path.join(OUT, "index.html"), versionMedia(readFileSync(path.join(ROOT, "src", "index.html"), "utf8")));
+cpSync(path.join(ROOT, "src", "404.html"), path.join(OUT, "404.html"));
 for (const name of ["site.css", "site.js"]) cpSync(path.join(ROOT, "src", name), path.join(OUT, "assets", name));
 for (const name of ["favicon.svg", "fonts", "media"]) cpSync(path.join(ROOT, "public", name), path.join(OUT, name), { recursive: true });
 writeFileSync(path.join(OUT, "robots.txt"), "User-agent: *\nAllow: /\nSitemap: https://losql.dev/sitemap.xml\n");
