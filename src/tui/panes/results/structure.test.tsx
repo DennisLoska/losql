@@ -802,3 +802,176 @@ describe("Drivers without describeRelation", () => {
     expect(app.frame()).not.toMatch(/unavailable/i);
   });
 });
+
+describe("Structure bounds across reloads, resizes and long values", () => {
+  const threeColumns = (name: string) => [
+    { name: "id", type: "integer", nullable: false, primaryKeyPosition: 1, references: [] },
+    { name: "middle_col", type: "text", nullable: true, references: [] },
+    { name: name, type: "text", nullable: true, references: [] },
+  ];
+
+  test("a shrinking reload clamps the grid cursor, keeps the highlight and status and y copies the clamped row", async () => {
+    let shrunk = false;
+    const details = () =>
+      shrunk
+        ? ordersDetails({ columns: [{ name: "only_col", type: "integer", nullable: false, references: [] }] })
+        : ordersDetails({ columns: threeColumns("last_col") });
+    const driver = lookupDriver(ordersSchema, () => details());
+    await start({ connection: "postgres://localhost/dev", deps: { openSession: driver.openSession } });
+    app.api.results.inspect(mainRef("orders"));
+    await waitReady();
+
+    await app.press("G");
+    expect(app.api.status.current().position).toBe("3:1");
+
+    shrunk = true;
+    const before = driver.calls.length;
+    await app.press("R");
+    await app.waitFor(() => driver.calls.length > before);
+    await waitReady();
+    await app.settle();
+
+    const selection = app.api.theme.color("selection").toInts();
+    expect(spanWith(app.spans(), "only_col")!.bg.toInts()).toEqual(selection);
+    expect(app.api.status.current().position).toBe("1:1");
+    await app.press("y");
+    await app.waitFor(() => copiedText() === "only_col");
+    expect(copiedText()).toBe("only_col");
+  });
+
+  test("a shrinking committed refresh clamps the cursor and the open detail follows the clamped row", async () => {
+    let shrunk = false;
+    const driver = lookupDriver(ordersSchema, () =>
+      ordersDetails({ columns: shrunk ? threeColumns("tail_col").slice(0, 2) : threeColumns("tail_col") }),
+    );
+    await start({ connection: "postgres://localhost/dev", deps: { openSession: driver.openSession } });
+    app.api.results.inspect(mainRef("orders"));
+    await waitReady();
+    await app.press("G<CR>");
+    expect(app.frame()).toContain("Column: tail_col");
+
+    shrunk = true;
+    const before = driver.calls.length;
+    await app.api.session.refreshSchema();
+    await app.waitFor(() => driver.calls.length > before);
+    await waitReady();
+    await app.settle();
+    expect(app.api.status.current().position).toBe("2:1");
+    expect(app.frame()).toContain("Column: middle_col");
+  });
+
+  const longColumns = Array.from({ length: 300 }, (_, i) => `col_${String(i + 1).padStart(3, "0")} integer`);
+  const longDefinition = `CREATE TABLE long_def (${longColumns.join(", ")}, final_marker_col text)`;
+  const visibleCols = () =>
+    [...app.frame().matchAll(/col_(\d{3})/g)].map((match) => Number(match[1]));
+
+  async function openDefinition(definition: () => string) {
+    const schema = schemaWith([{ name: "long_def", kind: "table", columns: [] }]);
+    const driver = lookupDriver(schema, () => ordersDetails({ name: "long_def", definition: definition() }));
+    await start({ connection: "postgres://localhost/dev", deps: { openSession: driver.openSession } });
+    app.api.results.inspect({ namespace: "main", name: "long_def" });
+    await waitReady();
+    await app.press("4");
+    expect(structure()!.section).toBe("definition");
+    return driver;
+  }
+
+  test("a long single-line definition wraps and scrolls with j, G and gg to its closing token", async () => {
+    await openDefinition(() => longDefinition);
+    expect(app.frame()).toContain("CREATE TABLE long_def");
+    expect(app.frame()).not.toContain("final_marker_col");
+
+    await app.press("j");
+    expect(app.frame()).not.toContain("CREATE TABLE long_def");
+
+    await app.press("G");
+    expect(app.frame()).toContain("final_marker_col");
+    expect(app.frame()).not.toContain("CREATE TABLE long_def");
+
+    await app.press("gg");
+    expect(app.frame()).toContain("CREATE TABLE long_def");
+  });
+
+  test("a definition split by bare carriage returns scrolls to its last line", async () => {
+    const definition = Array.from({ length: 80 }, (_, i) => `line_${String(i + 1).padStart(3, "0")}`).join("\r");
+    await openDefinition(() => definition);
+    expect(app.frame()).toContain("line_001");
+    expect(app.frame()).not.toContain("line_080");
+    await app.press("G");
+    expect(app.frame()).toContain("line_080");
+    expect(app.frame()).not.toContain("line_001");
+  });
+
+  test("the definition scroll is clamped when a reload shortens it", async () => {
+    let short = false;
+    const driver = await openDefinition(() =>
+      short ? "CREATE TABLE long_def (short_marker integer)" : longDefinition,
+    );
+    await app.press("G");
+    expect(app.frame()).toContain("final_marker_col");
+
+    short = true;
+    const before = driver.calls.length;
+    await app.press("R");
+    await app.waitFor(() => driver.calls.length > before);
+    await waitReady();
+    await app.settle();
+    expect(app.frame()).toContain("short_marker");
+    await app.press("k");
+    expect(app.frame()).toContain("short_marker");
+  });
+
+  test("the definition scroll is clamped when the viewport grows taller", async () => {
+    await openDefinition(() => longDefinition);
+    await app.press("G");
+    expect(app.frame()).toContain("final_marker_col");
+    const firstBefore = Math.min(...visibleCols());
+
+    await app.resize(120, 60);
+    await app.settle();
+    expect(app.frame()).toContain("final_marker_col");
+    expect(Math.min(...visibleCols())).toBeLessThan(firstBefore);
+
+    // Clamped at the end: one k shows exactly one earlier row instead of doing nothing visible.
+    const firstAtEnd = Math.min(...visibleCols());
+    await app.press("k");
+    expect(Math.min(...visibleCols())).toBeLessThan(firstAtEnd);
+  });
+
+  test("Enter on a long CHECK clips the detail and j, G and gg scroll it to the end of the expression", async () => {
+    const states = Array.from({ length: 80 }, (_, i) => `'state_${String(i + 1).padStart(3, "0")}'`);
+    const check = `CHECK (status IN (${states.join(", ")}))`;
+    const details = ordersDetails({
+      name: "checked",
+      constraints: [{ name: "status_check", kind: "CHECK", columns: ["status"], definition: check }],
+    });
+    const schema = schemaWith([{ name: "checked", kind: "table", columns: [] }]);
+    const driver = lookupDriver(schema, () => details);
+    await start({ connection: "postgres://localhost/dev", deps: { openSession: driver.openSession } });
+    app.api.results.inspect({ namespace: "main", name: "checked" });
+    await waitReady();
+    await app.press("3");
+    expect(structure()!.section).toBe("constraints");
+
+    await app.press("<CR>");
+    expect(app.frame()).toContain("Name: status_check");
+    expect(app.frame()).not.toContain("state_080");
+    expect(app.frame()).toMatch(/detail 1–\d+\/\d+ · j\/k scroll · esc close/);
+
+    await app.press("j");
+    expect(app.frame()).not.toContain("Name: status_check");
+    expect(app.frame()).toMatch(/detail 2–/);
+
+    await app.press("G");
+    expect(app.frame()).toContain("state_080'))");
+    const match = app.frame().match(/detail \d+–(\d+)\/(\d+)/)!;
+    expect(match[1]).toBe(match[2]);
+
+    await app.press("gg");
+    expect(app.frame()).toContain("Name: status_check");
+
+    await app.press("<Esc>");
+    expect(app.frame()).not.toContain("j/k scroll");
+    expect(structure()).not.toBeNull();
+  });
+});

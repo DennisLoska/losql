@@ -40,11 +40,15 @@ import { RecordView } from "./RecordView";
 import { type FlashSpec, ResultGrid } from "./ResultGrid";
 import { detailsFromSnapshot, findRelation, pickRelation, sameRelation } from "./relations";
 import {
+  definitionText,
+  detailRows,
+  detailWindow,
   sectionsOf,
   sectionTable,
   type StructureSection,
   type StructureState,
   StructureView,
+  wrapRanges,
 } from "./StructureView";
 
 export type { StructureSection, StructureState } from "./StructureView";
@@ -232,6 +236,10 @@ export function ResultsPane(props: {
   const [structurePendingG, setStructurePendingG] = createSignal(false);
   const [detailOpen, setDetailOpen] = createSignal(false);
   const [definitionTop, setDefinitionTop] = createSignal(0);
+  const [detailTop, setDetailTop] = createSignal(0);
+  // The measured Definition viewport and Enter detail width; 0 until the first layout.
+  const [definitionViewport, setDefinitionViewport] = createSignal({ width: 0, height: 8 });
+  const [detailWidth, setDetailWidth] = createSignal(0);
   const [structureFlash, setStructureFlash] = createSignal<FlashSpec | null>(null);
   const [lastInspected, setLastInspected] = createSignal<RelationRef | null>(null);
 
@@ -244,7 +252,6 @@ export function ResultsPane(props: {
   let loadSessionId = -1;
   let loadRevision = -1;
   let structureGridRows = 8;
-  let definitionHeight = 8;
   let cancelStructureFlash: (() => void) | null = null;
 
   const stopStructureFlash = () => {
@@ -271,6 +278,34 @@ export function ResultsPane(props: {
     return sectionTable(state.details, state.section);
   });
 
+  // The cursor kept inside the section shown, so a reload that shrinks it never leaves it past the end.
+  const clampedStructureCursor = createMemo(() => {
+    const table = structureTable();
+    const cur = structureCursor();
+    if (!table) return { row: 0, column: 0 };
+    return {
+      row: Math.max(0, Math.min(table.rows.length - 1, cur.row)),
+      column: Math.max(0, Math.min(table.columns.length - 1, cur.column)),
+    };
+  });
+
+  const detailShown = createMemo(() => detailOpen() && (structureTable()?.rows.length ?? 0) > 0);
+  const structureDetailRows = createMemo(() =>
+    detailShown() ? detailRows(structureTable(), clampedStructureCursor(), detailWidth()) : [],
+  );
+  const maxDetailTop = () => {
+    const total = structureDetailRows().length;
+    return Math.max(0, total - detailWindow(total).visible);
+  };
+  const clampedDetailTop = createMemo(() => Math.max(0, Math.min(maxDetailTop(), detailTop())));
+
+  const definitionRows = createMemo(() =>
+    wrapRanges(definitionText(structure()?.details ?? null), definitionViewport().width),
+  );
+  const definitionHeight = () => Math.max(1, definitionViewport().height);
+  const maxDefinitionTop = () => Math.max(0, definitionRows().length - definitionHeight());
+  const clampedDefinitionTop = createMemo(() => Math.max(0, Math.min(maxDefinitionTop(), definitionTop())));
+
   const safeError = (err: unknown, driver: Driver): string => {
     const raw = err instanceof Error ? err.message : String(err);
     const url = driver.connection.url;
@@ -284,6 +319,11 @@ export function ResultsPane(props: {
       const section = sectionsOf(details).includes(prev.section) ? prev.section : "columns";
       return { ref: prev.ref, status: "ready", details, section };
     });
+    // A reload may shrink what was shown: keep the cursor and scroll positions inside it.
+    setStructureCursor(untrack(clampedStructureCursor));
+    if (!untrack(detailShown)) setDetailOpen(false);
+    setDetailTop(untrack(clampedDetailTop));
+    setDefinitionTop(untrack(clampedDefinitionTop));
   };
 
   const loadStructure = (ref: RelationRef, section: StructureSection, keepDetails: boolean) => {
@@ -339,6 +379,7 @@ export function ResultsPane(props: {
     setStructureCursor({ row: 0, column: 0 });
     setStructurePendingG(false);
     setDetailOpen(false);
+    setDetailTop(0);
     setDefinitionTop(0);
     stopStructureFlash();
   };
@@ -410,6 +451,7 @@ export function ResultsPane(props: {
     setStructure((prev) => (prev && prev.section !== section ? { ...prev, section } : prev));
     setStructureCursor({ row: 0, column: 0 });
     setDetailOpen(false);
+    setDetailTop(0);
     setDefinitionTop(0);
     stopStructureFlash();
   };
@@ -417,7 +459,7 @@ export function ResultsPane(props: {
   const moveStructureCursor = (dRow: number, dCol: number, absolute?: { row?: number; column?: number }) => {
     const table = structureTable();
     if (!table) return;
-    const cur = structureCursor();
+    const cur = clampedStructureCursor();
     const maxRow = Math.max(0, table.rows.length - 1);
     const maxCol = Math.max(0, table.columns.length - 1);
     const row = absolute?.row ?? cur.row + dRow;
@@ -426,13 +468,19 @@ export function ResultsPane(props: {
       row: Math.max(0, Math.min(maxRow, row)),
       column: Math.max(0, Math.min(maxCol, column)),
     });
+    setDetailTop(0);
   };
 
   const scrollDefinition = (delta: number, absolute?: number) => {
-    const lines = (structure()?.details?.definition ?? "").split("\n").length;
-    const max = Math.max(0, lines - Math.max(1, definitionHeight));
-    const next = absolute ?? definitionTop() + delta;
-    setDefinitionTop(Math.max(0, Math.min(max, next)));
+    const next = absolute ?? clampedDefinitionTop() + delta;
+    setDefinitionTop(Math.max(0, Math.min(maxDefinitionTop(), next)));
+  };
+
+  // Whether the open Enter detail has more rows than it shows; its scroll keys take over only then.
+  const detailScrollable = () => detailWindow(structureDetailRows().length).scrollable;
+  const scrollDetail = (delta: number, absolute?: number) => {
+    const next = absolute ?? clampedDetailTop() + delta;
+    setDetailTop(Math.max(0, Math.min(maxDetailTop(), next)));
   };
 
   const yankStructure = () => {
@@ -444,7 +492,7 @@ export function ResultsPane(props: {
       text = state.details.definition;
     } else {
       const table = structureTable();
-      const cur = structureCursor();
+      const cur = clampedStructureCursor();
       text = table?.rows[cur.row]?.[cur.column];
       flashSpec = { rows: new Set([cur.row]), column: cur.column };
     }
@@ -475,11 +523,13 @@ export function ResultsPane(props: {
     if (!state) return false;
     const isPlain = !key.ctrl && !key.meta;
     const inDefinition = state.section === "definition";
+    const inDetail = !inDefinition && detailShown() && detailScrollable();
 
     if (structurePendingG()) {
       setStructurePendingG(false);
       if (isPlain && key.text === "g") {
         if (inDefinition) scrollDefinition(0, 0);
+        else if (inDetail) scrollDetail(0, 0);
         else moveStructureCursor(0, 0, { row: 0 });
         return true;
       }
@@ -502,8 +552,9 @@ export function ResultsPane(props: {
       return true;
     }
     if (key.name === "escape" && !key.ctrl && !key.meta) {
-      if (detailOpen()) {
+      if (detailShown()) {
         setDetailOpen(false);
+        setDetailTop(0);
         return true;
       }
       closeStructure({ restore: true });
@@ -526,7 +577,10 @@ export function ResultsPane(props: {
       return true;
     }
     if (isPlain && key.name === "enter") {
-      if (!inDefinition && structureTable()?.rows.length) setDetailOpen((open) => !open);
+      if (!inDefinition && structureTable()?.rows.length) {
+        setDetailOpen(!detailShown());
+        setDetailTop(0);
+      }
       return true;
     }
 
@@ -535,10 +589,23 @@ export function ResultsPane(props: {
       if (isPlain && (key.text === "j" || key.name === "down")) scrollDefinition(1);
       else if (isPlain && (key.text === "k" || key.name === "up")) scrollDefinition(-1);
       else if (isPlain && key.text === "G") scrollDefinition(0, Number.MAX_SAFE_INTEGER);
-      else if (key.ctrl && !key.meta && key.name === "d") scrollDefinition(half(definitionHeight));
-      else if (key.ctrl && !key.meta && key.name === "u") scrollDefinition(-half(definitionHeight));
+      else if (key.ctrl && !key.meta && key.name === "d") scrollDefinition(half(definitionHeight()));
+      else if (key.ctrl && !key.meta && key.name === "u") scrollDefinition(-half(definitionHeight()));
       else return false;
       return true;
+    }
+
+    if (inDetail) {
+      // The detail's own scroll keys; h, l, 0 and $ still move the cursor across the fields.
+      const page = half(detailWindow(structureDetailRows().length).visible);
+      let handled = true;
+      if (isPlain && (key.text === "j" || key.name === "down")) scrollDetail(1);
+      else if (isPlain && (key.text === "k" || key.name === "up")) scrollDetail(-1);
+      else if (isPlain && key.text === "G") scrollDetail(0, Number.MAX_SAFE_INTEGER);
+      else if (key.ctrl && !key.meta && key.name === "d") scrollDetail(page);
+      else if (key.ctrl && !key.meta && key.name === "u") scrollDetail(-page);
+      else handled = false;
+      if (handled) return true;
     }
 
     if (isPlain && (key.text === "j" || key.name === "down")) moveStructureCursor(1, 0);
@@ -1055,7 +1122,7 @@ export function ResultsPane(props: {
 
   status.register("results", () => {
     if (structure() !== null) {
-      const cur = structureCursor();
+      const cur = clampedStructureCursor();
       const table = structureTable();
       return {
         mode: "NORMAL",
@@ -1213,15 +1280,22 @@ export function ResultsPane(props: {
           {(state: () => StructureState) => (
             <StructureView
               state={state()}
-              cursor={structureCursor()}
-              detailOpen={detailOpen()}
-              definitionTop={definitionTop()}
+              cursor={clampedStructureCursor()}
+              detailRows={structureDetailRows()}
+              detailTop={clampedDetailTop()}
+              definitionRows={definitionRows()}
+              definitionTop={clampedDefinitionTop()}
+              definitionHeight={definitionHeight()}
               flash={structureFlash()}
               onViewport={(vp) => {
                 structureGridRows = vp.rowCount;
               }}
-              onDefinitionHeight={(height) => {
-                definitionHeight = height;
+              onDefinitionViewport={(width, height) => {
+                const prev = untrack(definitionViewport);
+                if (prev.width !== width || prev.height !== height) setDefinitionViewport({ width, height });
+              }}
+              onDetailWidth={(width) => {
+                if (untrack(detailWidth) !== width) setDetailWidth(width);
               }}
             />
           )}
