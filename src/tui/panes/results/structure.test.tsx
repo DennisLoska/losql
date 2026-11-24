@@ -10,6 +10,8 @@ import type {
 } from "../../../core/db/types";
 import { QueryError } from "../../../core/db/types";
 import { mount, spanWith, type MountOptions, type TestApp } from "../../testing";
+import { cellWidth } from "../../ui/cells";
+import { wrapRanges } from "./StructureView";
 
 let app: TestApp;
 afterEach(async () => { await app?.dispose(); });
@@ -973,5 +975,74 @@ describe("Structure bounds across reloads, resizes and long values", () => {
     await app.press("<Esc>");
     expect(app.frame()).not.toContain("j/k scroll");
     expect(structure()).not.toBeNull();
+  });
+
+  test("at 80x24 a long CHECK detail keeps its scroll hint visible and G reaches the end", async () => {
+    const states = Array.from({ length: 80 }, (_, i) => `'state_${String(i + 1).padStart(3, "0")}'`);
+    const check = `CHECK (status IN (${states.join(", ")}))`;
+    const details = ordersDetails({
+      name: "checked",
+      constraints: [{ name: "status_check", kind: "CHECK", columns: ["status"], definition: check }],
+    });
+    const schema = schemaWith([{ name: "checked", kind: "table", columns: [] }]);
+    const driver = lookupDriver(schema, () => details);
+    await start({ width: 80, height: 24, connection: "postgres://localhost/dev", deps: { openSession: driver.openSession } });
+    app.api.results.inspect({ namespace: "main", name: "checked" });
+    await waitReady();
+    await app.press("3");
+    expect(structure()!.section).toBe("constraints");
+
+    await app.press("<CR>");
+    expect(app.frame()).toContain("Name: status_check");
+    expect(app.frame()).toMatch(/detail 1–\d+\/\d+ · j\/k scroll · esc close/);
+
+    await app.press("G");
+    expect(app.frame()).toContain("state_080'))");
+    expect(app.frame()).toMatch(/detail \d+–\d+\/\d+ · j\/k scroll/);
+    const match = app.frame().match(/detail \d+–(\d+)\/(\d+)/)!;
+    expect(match[1]).toBe(match[2]);
+  });
+
+  test("at 80x24 every field of a Columns row detail is reachable, Key included", async () => {
+    const driver = lookupDriver(ordersSchema, () => ordersDetails());
+    await start({ width: 80, height: 24, connection: "postgres://localhost/dev", deps: { openSession: driver.openSession } });
+    app.api.results.inspect(mainRef("orders"));
+    await waitReady();
+
+    await app.press("<CR>");
+    expect(app.frame()).toContain("Column: id");
+    await app.press("G");
+    expect(app.frame()).toContain("Key: PK");
+    const seen = new Set<string>();
+    await app.press("gg");
+    for (let i = 0; i < 6; i++) {
+      for (const label of ["Column:", "Type:", "Null:", "Default:", "Key:"]) {
+        if (app.frame().includes(label)) seen.add(label);
+      }
+      await app.press("j");
+    }
+    expect([...seen].sort()).toEqual(["Column:", "Default:", "Key:", "Null:", "Type:"]);
+  });
+});
+
+describe("wrapRanges", () => {
+  function check(text: string, width: number) {
+    const rows = wrapRanges(text, width);
+    for (const row of rows) expect(cellWidth(text.slice(row.start, row.end))).toBeLessThanOrEqual(width);
+    expect(rows.map((row) => text.slice(row.start, row.end)).join("")).toBe(text);
+    for (let i = 1; i < rows.length; i++) expect(rows[i]!.start).toBe(rows[i - 1]!.end);
+  }
+
+  test("a wide grapheme after a space break never overflows the width", () => {
+    check(" abc字", 4);
+  });
+
+  test("rows stay within the width for wide graphemes after a break, across widths", () => {
+    for (let w = 4; w <= 20; w++) {
+      check("a " + "b".repeat(w - 2) + "漢", w);
+      check("a " + "b".repeat(w - 2) + "🚀", w);
+      check(" " + "b".repeat(w - 1) + "漢", w);
+      check(" " + "b".repeat(w - 1) + "🚀", w);
+    }
   });
 });

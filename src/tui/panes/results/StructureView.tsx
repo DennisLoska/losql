@@ -168,6 +168,12 @@ export function wrapRanges(text: string, width: number): TextRange[] {
         rows.push({ start: rowStart, end: breakAt });
         rowWidth -= breakWidth;
         rowStart = breakAt;
+        // What follows the space can still be too wide for a wide grapheme: break before it too.
+        if (rowWidth > 0 && rowWidth + w > width) {
+          rows.push({ start: rowStart, end: index });
+          rowStart = index;
+          rowWidth = 0;
+        }
       } else {
         rows.push({ start: rowStart, end: index });
         rowStart = index;
@@ -216,10 +222,24 @@ export function detailRows(table: StructureTable | null, cursor: { row: number; 
   return out;
 }
 
-/** How many detail rows are visible for `total` rows, and whether a scroll hint takes the last row. */
-export function detailWindow(total: number): { visible: number; scrollable: boolean } {
-  if (total <= DETAIL_MAX_ROWS) return { visible: total, scrollable: false };
-  return { visible: DETAIL_MAX_ROWS - 1, scrollable: true };
+/** The Enter detail's layout: rows of content visible, whether it scrolls, whether a hint row shows, and its height. */
+export interface DetailWindow {
+  visible: number;
+  scrollable: boolean;
+  showHint: boolean;
+  height: number;
+}
+
+/**
+ * The window of the Enter detail for `total` rows inside a section `maxRows` tall: at most
+ * DETAIL_MAX_ROWS and never taller than the section, so neither its rows nor its scroll hint are clipped.
+ * The hint takes the last row while the detail scrolls, unless only one row fits.
+ */
+export function detailWindow(total: number, maxRows: number = DETAIL_MAX_ROWS): DetailWindow {
+  const cap = Math.min(DETAIL_MAX_ROWS, Math.max(1, maxRows));
+  if (total <= cap) return { visible: total, scrollable: false, showHint: false, height: total };
+  if (cap === 1) return { visible: 1, scrollable: true, showHint: false, height: 1 };
+  return { visible: cap - 1, scrollable: true, showHint: true, height: cap };
 }
 
 const ROLE_TO_TOKEN: Record<SyntaxRole, ThemeToken> = {
@@ -276,6 +296,8 @@ export function StructureView(props: {
   /** The wrapped rows of the Enter detail; empty while it is closed. */
   detailRows: DetailRow[];
   detailTop: number;
+  /** The measured height of the section the detail opens in; it bounds the detail's height. */
+  detailMaxRows: number;
   /** The wrapped rows of the Definition, as ranges of `definitionText(details)`. */
   definitionRows: TextRange[];
   definitionTop: number;
@@ -283,7 +305,7 @@ export function StructureView(props: {
   flash: FlashSpec | null;
   onViewport?: (vp: Viewport) => void;
   onDefinitionViewport?: (width: number, height: number) => void;
-  onDetailWidth?: (width: number) => void;
+  onDetailSize?: (width: number, height: number) => void;
 }): JSX.Element {
   const theme = useTheme();
 
@@ -297,12 +319,12 @@ export function StructureView(props: {
 
   const detailView = createMemo(() => {
     const rows = props.detailRows;
-    const { visible, scrollable } = detailWindow(rows.length);
+    const { visible, showHint, height } = detailWindow(rows.length, props.detailMaxRows);
     const top = props.detailTop;
-    const hint = scrollable
+    const hint = showHint
       ? `detail ${top + 1}–${Math.min(rows.length, top + visible)}/${rows.length} · j/k scroll · esc close`
       : "";
-    return { rows: rows.slice(top, top + visible), hint };
+    return { rows: rows.slice(top, top + visible), hint, height };
   });
 
   const definition = createMemo(() => definitionText(details()));
@@ -319,8 +341,8 @@ export function StructureView(props: {
   };
 
   let tableBox: BoxRenderable | null = null;
-  const reportDetailWidth = () => {
-    if (tableBox && tableBox.width > 0) props.onDetailWidth?.(tableBox.width);
+  const reportDetailSize = () => {
+    if (tableBox && tableBox.width > 0 && tableBox.height > 0) props.onDetailSize?.(tableBox.width, tableBox.height);
   };
 
   const unavailableText = () => {
@@ -413,31 +435,34 @@ export function StructureView(props: {
             <box
               ref={(el: BoxRenderable) => {
                 tableBox = el;
-                reportDetailWidth();
+                reportDetailSize();
               }}
-              onSizeChange={reportDetailWidth}
+              onSizeChange={reportDetailSize}
               flexDirection="column"
               flexGrow={1}
               width="100%"
+              overflow="hidden"
             >
-              <Show when={current()} keyed>
-                {(t: StructureTable) => (
-                  <DataGrid
-                    columns={t.columns}
-                    rows={t.rows as Cell[][]}
-                    cursor={props.cursor}
-                    selectedRows={null}
-                    flash={props.flash}
-                    onViewport={(vp) => props.onViewport?.(vp)}
-                  />
-                )}
-              </Show>
+              <box flexGrow={1} flexShrink={1} minHeight={0} width="100%" overflow="hidden">
+                <Show when={current()} keyed>
+                  {(t: StructureTable) => (
+                    <DataGrid
+                      columns={t.columns}
+                      rows={t.rows as Cell[][]}
+                      cursor={props.cursor}
+                      selectedRows={null}
+                      flash={props.flash}
+                      onViewport={(vp) => props.onViewport?.(vp)}
+                    />
+                  )}
+                </Show>
+              </box>
               <Show when={detailView().rows.length > 0}>
                 <box
                   flexDirection="column"
                   width="100%"
                   flexShrink={0}
-                  height={detailView().rows.length + (detailView().hint ? 1 : 0)}
+                  height={detailView().height}
                   overflow="hidden"
                   backgroundColor={theme.color("backgroundElement")}
                 >

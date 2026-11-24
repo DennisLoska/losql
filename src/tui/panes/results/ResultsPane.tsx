@@ -40,6 +40,7 @@ import { RecordView } from "./RecordView";
 import { type FlashSpec, ResultGrid } from "./ResultGrid";
 import { detailsFromSnapshot, findRelation, pickRelation, sameRelation } from "./relations";
 import {
+  DETAIL_MAX_ROWS,
   definitionText,
   detailRows,
   detailWindow,
@@ -240,6 +241,8 @@ export function ResultsPane(props: {
   // The measured Definition viewport and Enter detail width; 0 until the first layout.
   const [definitionViewport, setDefinitionViewport] = createSignal({ width: 0, height: 8 });
   const [detailWidth, setDetailWidth] = createSignal(0);
+  // The measured height of the section the Enter detail opens in; DETAIL_MAX_ROWS until the first layout.
+  const [detailMaxRows, setDetailMaxRows] = createSignal(DETAIL_MAX_ROWS);
   const [structureFlash, setStructureFlash] = createSignal<FlashSpec | null>(null);
   const [lastInspected, setLastInspected] = createSignal<RelationRef | null>(null);
 
@@ -295,7 +298,7 @@ export function ResultsPane(props: {
   );
   const maxDetailTop = () => {
     const total = structureDetailRows().length;
-    return Math.max(0, total - detailWindow(total).visible);
+    return Math.max(0, total - detailWindow(total, detailMaxRows()).visible);
   };
   const clampedDetailTop = createMemo(() => Math.max(0, Math.min(maxDetailTop(), detailTop())));
 
@@ -477,7 +480,7 @@ export function ResultsPane(props: {
   };
 
   // Whether the open Enter detail has more rows than it shows; its scroll keys take over only then.
-  const detailScrollable = () => detailWindow(structureDetailRows().length).scrollable;
+  const detailScrollable = () => detailWindow(structureDetailRows().length, detailMaxRows()).scrollable;
   const scrollDetail = (delta: number, absolute?: number) => {
     const next = absolute ?? clampedDetailTop() + delta;
     setDetailTop(Math.max(0, Math.min(maxDetailTop(), next)));
@@ -1283,6 +1286,7 @@ export function ResultsPane(props: {
               cursor={clampedStructureCursor()}
               detailRows={structureDetailRows()}
               detailTop={clampedDetailTop()}
+              detailMaxRows={detailMaxRows()}
               definitionRows={definitionRows()}
               definitionTop={clampedDefinitionTop()}
               definitionHeight={definitionHeight()}
@@ -1294,8 +1298,9 @@ export function ResultsPane(props: {
                 const prev = untrack(definitionViewport);
                 if (prev.width !== width || prev.height !== height) setDefinitionViewport({ width, height });
               }}
-              onDetailWidth={(width) => {
+              onDetailSize={(width, height) => {
                 if (untrack(detailWidth) !== width) setDetailWidth(width);
+                if (untrack(detailMaxRows) !== height) setDetailMaxRows(height);
               }}
             />
           )}
