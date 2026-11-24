@@ -1382,6 +1382,51 @@ suite("postgres relation details and the side queue", () => {
     }
   }, 20000);
 
+  test("a failed type-name lookup never aborts the user's open transaction", async () => {
+    await driver.run(`create table ${schema}.kept_by_tx (id int)`);
+    // A fresh Session, so `inet` is not in its type name cache yet.
+    const session = await openSession(parseConnection(url!));
+    const locker = await openSession(parseConnection(url!));
+    let lockHeld = false;
+    try {
+      await session.run("begin");
+      await session.run("set local lock_timeout = '10ms'");
+      await session.run(`insert into ${schema}.kept_by_tx values (1)`);
+      // Warms the backend's own caches for inet without returning a column to name.
+      await session.run("select from (select '127.0.0.1'::inet) s");
+
+      await locker.run("begin");
+      try {
+        await locker.run("set local lock_timeout = '2s'");
+        await locker.run("lock table pg_catalog.pg_type in access exclusive mode");
+        lockHeld = true;
+      } catch (err) {
+        // Only a role that may lock pg_type can run this case.
+        if (err instanceof QueryError && err.code === "42501") return;
+        throw err;
+      }
+
+      // The statement itself succeeds; its type-name lookup hits lock_timeout on pg_type.
+      const result = await session.run("select '127.0.0.1'::inet as ip");
+      expect(result.rows).toEqual([["127.0.0.1"]]);
+      expect(result.columns).toEqual([{ name: "ip", type: "869" }]);
+
+      await locker.run("rollback");
+      lockHeld = false;
+
+      // The transaction is still alive: it runs statements and its insert is committed.
+      expect((await session.run("select 1 as one")).rows).toEqual([[1]]);
+      await session.run("commit");
+      const kept = await driver.run(`select count(*)::int as n from ${schema}.kept_by_tx`);
+      expect(kept.rows).toEqual([[1]]);
+    } finally {
+      if (lockHeld) await locker.run("rollback").catch(() => {});
+      await session.run("rollback").catch(() => {});
+      await locker.close();
+      await session.close();
+    }
+  }, 20000);
+
   test("close() rejects queued describeRelation() and schema() callers with a closed-Session QueryError", async () => {
     const session = await openSession(parseConnection(url!));
     const startedAt = performance.now();

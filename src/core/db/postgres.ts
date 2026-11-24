@@ -697,26 +697,52 @@ export async function openPostgres(
    * open transaction created. Names are cached only when that transaction has written nothing, so
    * nothing it may roll back is kept; OIDs pg_type does not show are not cached either. A failed
    * lookup is not a failed Run: its uncached types show as their OIDs.
+   *
+   * Inside the user's open transaction a failed statement would abort that transaction, so the
+   * lookup runs under a savepoint that is rolled back when it fails. The client does not expose the
+   * connection's transaction status, so the SAVEPOINT is also the probe: outside a transaction it is
+   * refused with 25P01 and the lookup runs plainly, where a failure has no transaction to abort.
    */
   async function resolveTypeNamesOnUser(oids: number[]): Promise<Map<number, string>> {
     const names = new Map<number, string>();
     const missing = [...new Set(oids.filter((oid) => !typeNames.has(oid)))];
     if (missing.length === 0) return names;
 
+    // Unnamed statements: a user's DEALLOCATE ALL or DISCARD ALL cannot break them.
+    const unnamed = { prepare: false } as const;
+    const savepoint = "losql_type_names";
+    let inTransaction: boolean;
+    try {
+      await user.unsafe(`savepoint ${savepoint}`, [], unnamed);
+      inTransaction = true;
+    } catch (err) {
+      if ((err as { code?: unknown }).code !== "25P01") {
+        // Not the no-transaction refusal: leave the connection alone; uncached types show as OIDs.
+        return names;
+      }
+      inTransaction = false;
+    }
+
     try {
       const rows = await user.unsafe<{ oid: string; typname: string; cacheable: boolean }[]>(
-        "select t.oid::bigint as oid, t.typname::text as typname, txid_current_if_assigned() is null as cacheable from pg_catalog.pg_type t where t.oid = any($1::oid[])",
+        "select t.oid::pg_catalog.int8 as oid, t.typname::pg_catalog.text as typname, pg_catalog.txid_current_if_assigned() is null as cacheable from pg_catalog.pg_type t where t.oid operator(pg_catalog.=) any($1::pg_catalog.oid[])",
         [missing],
-        // Unnamed: a user's DEALLOCATE ALL or DISCARD ALL cannot break it inside their transaction.
-        { prepare: false },
+        unnamed,
       );
+      if (inTransaction) await user.unsafe(`release savepoint ${savepoint}`, [], unnamed);
       for (const row of rows) {
         const oid = Number(row.oid);
         names.set(oid, row.typname);
         if (row.cacheable) typeNames.set(oid, row.typname);
       }
     } catch {
-      // The Run itself succeeded; its uncached types show as their OIDs.
+      // The Run itself succeeded; its uncached types show as their OIDs. Inside a transaction the
+      // savepoint undoes the failed lookup, so the user's transaction stays usable.
+      if (inTransaction) {
+        await user
+          .unsafe(`rollback to savepoint ${savepoint}; release savepoint ${savepoint}`)
+          .catch(() => {});
+      }
     }
     return names;
   }
