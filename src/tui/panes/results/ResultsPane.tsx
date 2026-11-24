@@ -600,7 +600,7 @@ export function ResultsPane(props: {
 
     if (inDetail) {
       // The detail's own scroll keys; h, l, 0 and $ still move the cursor across the fields.
-      const page = half(detailWindow(structureDetailRows().length).visible);
+      const page = half(detailWindow(structureDetailRows().length, detailMaxRows()).visible);
       let handled = true;
       if (isPlain && (key.text === "j" || key.name === "down")) scrollDetail(1);
       else if (isPlain && (key.text === "k" || key.name === "up")) scrollDetail(-1);

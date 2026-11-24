@@ -1025,6 +1025,56 @@ describe("Structure bounds across reloads, resizes and long values", () => {
   });
 });
 
+describe("Enter detail half-page scrolling uses the measured detail height", () => {
+  const fields = ["Column:", "Type:", "Null:", "Default:", "Key:"];
+  const shownFields = () => fields.filter((label) => app.frame().includes(label));
+
+  test("at 80x24 Ctrl+d and Ctrl+u move a three-row Columns detail by one row", async () => {
+    const driver = lookupDriver(ordersSchema, () => ordersDetails());
+    await start({ width: 80, height: 24, connection: "postgres://localhost/dev", deps: { openSession: driver.openSession } });
+    app.api.results.inspect(mainRef("orders"));
+    await waitReady();
+
+    await app.press("<CR>");
+    expect(app.frame()).toMatch(/detail 1–3\/5 · j\/k scroll/);
+    expect(shownFields()).toEqual(["Column:", "Type:", "Null:"]);
+
+    await app.press("<C-d>");
+    expect(app.frame()).toMatch(/detail 2–4\/5 · j\/k scroll/);
+    expect(shownFields()).toEqual(["Type:", "Null:", "Default:"]);
+
+    await app.press("<C-d>");
+    expect(app.frame()).toMatch(/detail 3–5\/5 · j\/k scroll/);
+
+    await app.press("<C-u>");
+    expect(app.frame()).toMatch(/detail 2–4\/5 · j\/k scroll/);
+
+    await app.press("<C-u>");
+    expect(app.frame()).toMatch(/detail 1–3\/5 · j\/k scroll/);
+    expect(shownFields()).toEqual(["Column:", "Type:", "Null:"]);
+  });
+
+  test("at 80x18 a one-row Columns detail steps one field per Ctrl+d and Ctrl+u without skipping", async () => {
+    const driver = lookupDriver(ordersSchema, () => ordersDetails());
+    await start({ width: 80, height: 18, connection: "postgres://localhost/dev", deps: { openSession: driver.openSession } });
+    app.api.results.inspect(mainRef("orders"));
+    await waitReady();
+
+    await app.press("<CR>");
+    expect(shownFields()).toEqual(["Column:"]);
+
+    await app.press("<C-d>");
+    expect(shownFields()).toEqual(["Type:"]);
+    await app.press("<C-d>");
+    expect(shownFields()).toEqual(["Null:"]);
+
+    await app.press("<C-u>");
+    expect(shownFields()).toEqual(["Type:"]);
+    await app.press("<C-u>");
+    expect(shownFields()).toEqual(["Column:"]);
+  });
+});
+
 describe("wrapRanges", () => {
   function check(text: string, width: number) {
     const rows = wrapRanges(text, width);

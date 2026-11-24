@@ -235,7 +235,7 @@ export interface DetailWindow {
  * DETAIL_MAX_ROWS and never taller than the section, so neither its rows nor its scroll hint are clipped.
  * The hint takes the last row while the detail scrolls, unless only one row fits.
  */
-export function detailWindow(total: number, maxRows: number = DETAIL_MAX_ROWS): DetailWindow {
+export function detailWindow(total: number, maxRows: number): DetailWindow {
   const cap = Math.min(DETAIL_MAX_ROWS, Math.max(1, maxRows));
   if (total <= cap) return { visible: total, scrollable: false, showHint: false, height: total };
   if (cap === 1) return { visible: 1, scrollable: true, showHint: false, height: 1 };
